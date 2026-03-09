@@ -115,11 +115,24 @@ function run() {
   assert.equal(parsedToolMarker.kind, "tool_calls");
   assert.equal(parsedToolMarker.toolCalls[0].function.name, "write");
 
+  const parsedSingleBracketToolMarker = parseBridgeAssistantText(
+    "[OPENCODE_TOOL]\n{\"tool_calls\":{\"name\":\"write\",\"arguments\":{\"filePath\":\"a.txt\",\"content\":\"z\"}}}\n[/OPENCODE_TOOL]"
+  );
+  assert.equal(parsedSingleBracketToolMarker.kind, "tool_calls");
+  assert.equal(parsedSingleBracketToolMarker.toolCalls[0].function.name, "write");
+  assert.match(parsedSingleBracketToolMarker.toolCalls[0].function.arguments, /a.txt/);
+
   const parsedFinalMarker = parseBridgeAssistantText(
     "[[OPENCODE_FINAL]]\nDone.\n[[/OPENCODE_FINAL]]"
   );
   assert.equal(parsedFinalMarker.kind, "final");
   assert.equal(parsedFinalMarker.content, "Done.");
+
+  const parsedSingleBracketFinalMarker = parseBridgeAssistantText(
+    "[OPENCODE_FINAL]\nDone.\n[/OPENCODE_FINAL]"
+  );
+  assert.equal(parsedSingleBracketFinalMarker.kind, "final");
+  assert.equal(parsedSingleBracketFinalMarker.content, "Done.");
 
   const parsedCanonicalEnvelopeInsideProse = parseBridgeAssistantText(
     "I will do it now.\n[[OPENCODE_TOOL]]\n{\"tool_calls\":[{\"name\":\"read\",\"arguments\":{\"filePath\":\"c.txt\"}}]}\n[[/OPENCODE_TOOL]]\nThanks."

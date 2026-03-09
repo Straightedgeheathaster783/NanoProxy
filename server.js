@@ -17,6 +17,10 @@ const TOOL_MODE_MARKER = "[[OPENCODE_TOOL]]";
 const FINAL_MODE_MARKER = "[[OPENCODE_FINAL]]";
 const TOOL_MODE_END_MARKER = "[[/OPENCODE_TOOL]]";
 const FINAL_MODE_END_MARKER = "[[/OPENCODE_FINAL]]";
+const TOOL_MODE_MARKER_ALIASES = ["[OPENCODE_TOOL]", TOOL_MODE_MARKER];
+const FINAL_MODE_MARKER_ALIASES = ["[OPENCODE_FINAL]", FINAL_MODE_MARKER];
+const TOOL_MODE_END_MARKER_ALIASES = ["[/OPENCODE_TOOL]", TOOL_MODE_END_MARKER];
+const FINAL_MODE_END_MARKER_ALIASES = ["[/OPENCODE_FINAL]", FINAL_MODE_END_MARKER];
 
 function buildUpstreamUrl(requestPath) {
   const base = UPSTREAM_BASE_URL.replace(/\/+$/, "");
@@ -793,6 +797,10 @@ function startsWithMarker(text, marker) {
   return String(text || "").trimStart().startsWith(marker);
 }
 
+function startsWithAnyMarker(text, markers) {
+  return markers.some((marker) => startsWithMarker(text, marker));
+}
+
 function extractMarkerEnvelope(text, startMarker, endMarker) {
   const source = String(text || "");
   const start = source.indexOf(startMarker);
@@ -812,25 +820,51 @@ function stripMarker(text, marker) {
   return trimmed.slice(marker.length).replace(/^\s+/, "");
 }
 
+function stripAnyMarker(text, markers) {
+  const source = String(text || "");
+  for (const marker of markers) {
+    const stripped = stripMarker(source, marker);
+    if (stripped !== source) return stripped;
+  }
+  return source;
+}
+
+function extractAnyMarkerEnvelope(text, startMarkers, endMarkers) {
+  const source = String(text || "");
+  for (const startMarker of startMarkers) {
+    const start = source.indexOf(startMarker);
+    if (start === -1) continue;
+    const afterStart = source.slice(start + startMarker.length);
+    let bestEnd = -1;
+    for (const endMarker of endMarkers) {
+      const idx = afterStart.indexOf(endMarker);
+      if (idx !== -1 && (bestEnd === -1 || idx < bestEnd)) bestEnd = idx;
+    }
+    if (bestEnd === -1) return afterStart.trim();
+    return afterStart.slice(0, bestEnd).trim();
+  }
+  return null;
+}
+
 function parseBridgeAssistantText(text) {
-  const canonicalTool = extractMarkerEnvelope(text, TOOL_MODE_MARKER, TOOL_MODE_END_MARKER);
+  const canonicalTool = extractAnyMarkerEnvelope(text, TOOL_MODE_MARKER_ALIASES, TOOL_MODE_END_MARKER_ALIASES);
   if (canonicalTool !== null) {
     const toolCalls = bestEffortParseToolPayload(canonicalTool);
     if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
     return { kind: "invalid_tool_block", raw: text };
   }
 
-  const canonicalFinal = extractMarkerEnvelope(text, FINAL_MODE_MARKER, FINAL_MODE_END_MARKER);
+  const canonicalFinal = extractAnyMarkerEnvelope(text, FINAL_MODE_MARKER_ALIASES, FINAL_MODE_END_MARKER_ALIASES);
   if (canonicalFinal !== null) {
     return { kind: "final", content: canonicalFinal };
   }
 
-  if (startsWithMarker(text, TOOL_MODE_MARKER)) {
-    return parseBridgeAssistantText(stripMarker(text, TOOL_MODE_MARKER));
+  if (startsWithAnyMarker(text, TOOL_MODE_MARKER_ALIASES)) {
+    return parseBridgeAssistantText(stripAnyMarker(text, TOOL_MODE_MARKER_ALIASES));
   }
 
-  if (startsWithMarker(text, FINAL_MODE_MARKER)) {
-    return { kind: "final", content: stripMarker(text, FINAL_MODE_MARKER) };
+  if (startsWithAnyMarker(text, FINAL_MODE_MARKER_ALIASES)) {
+    return { kind: "final", content: stripAnyMarker(text, FINAL_MODE_MARKER_ALIASES) };
   }
 
   const toolBlock = extractFencedBlock(text, TOOL_BLOCK_LABEL);
