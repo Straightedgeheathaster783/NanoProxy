@@ -43,10 +43,14 @@ function run() {
   assert.match(request.rewritten.messages[1].content, /\[\[CALL\]\]/);
   assert.match(request.rewritten.messages[1].content, /\[\[\/CALL\]\]/);
   assert.match(request.rewritten.messages[1].content, /Invalid response example/);
+  assert.match(request.rewritten.messages[1].content, /Only two reply formats are valid/);
+  assert.match(request.rewritten.messages[1].content, /Do not use legacy bracketed formats/);
+  assert.match(request.rewritten.messages[1].content, /\[question\] \{ \.\.\. \}/);
   assert.equal(request.rewritten.temperature, 0.2);
   assert.equal(request.rewritten.top_p, 0.3);
   assert.equal(request.rewritten.messages[2].role, "user");
   assert.match(request.rewritten.messages[2].content, /Protocol requirements for your next reply/);
+  assert.match(request.rewritten.messages[2].content, /Do not use \[question\], \[write\], \[read\]/);
   assert.match(request.rewritten.messages[2].content, /first assistant turn/i);
 
   const requestWithToolResult = transformRequestForBridge({
@@ -71,7 +75,8 @@ function run() {
   assert.ok(bridgedToolResultMessage);
   assert.match(bridgedToolResultMessage.content, /Your next reply must be exactly one envelope/);
   assert.match(bridgedToolResultMessage.content, /Do not narrate the next step in plain text/);
-  assert.match(bridgedToolResultMessage.content, /multiple items in tool_calls/);
+  assert.match(bridgedToolResultMessage.content, /multiple CALL blocks/);
+  assert.match(bridgedToolResultMessage.content, /Do not use legacy forms like \[question\]/);
   const bridgedUserMessage = requestWithToolResult.rewritten.messages.find((msg) => msg.role === "user" && /Protocol requirements for your next reply/.test(msg.content || ""));
   assert.ok(bridgedUserMessage);
 
@@ -164,6 +169,13 @@ function run() {
   );
   assert.equal(parsedLooseFinalMarker.kind, "final");
   assert.equal(parsedLooseFinalMarker.content, "Done.");
+
+  const parsedBracketNamedTool = parseBridgeAssistantText(
+    '[question]\n{"questions":[{"question":"What do you want?","header":"Type","options":[{"label":"A","description":"desc"}]}]}'
+  );
+  assert.equal(parsedBracketNamedTool.kind, "tool_calls");
+  assert.equal(parsedBracketNamedTool.toolCalls[0].function.name, "question");
+  assert.match(parsedBracketNamedTool.toolCalls[0].function.arguments, /What do you want\?/);
 
   const parsedCanonicalEnvelopeInsideProse = parseBridgeAssistantText(
     "I will do it now.\n[[OPENCODE_TOOL]]\n{\"tool_calls\":[{\"name\":\"read\",\"arguments\":{\"filePath\":\"c.txt\"}}]}\n[[/OPENCODE_TOOL]]\nThanks."

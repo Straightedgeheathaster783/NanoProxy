@@ -468,11 +468,12 @@ function encodeToolResultBlock(message) {
     "```",
     "",
     "Continue from this tool result.",
-    `Your next reply must be exactly one envelope: either ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} or ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}.`,
+    `Your next reply must use exactly one of these formats: ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} or ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}.`,
+    `For tool use, only use ${CALL_MODE_MARKER} ... ${CALL_MODE_END_MARKER} blocks inside ${TOOL_MODE_MARKER}.`,
     "Do not narrate the next step in plain text.",
     "Do not say what you are about to do.",
-    "If more than one independent tool call is needed, you may include multiple items in tool_calls.",
-    "Otherwise call the next tool immediately or give the final answer envelope."
+    "Do not use legacy forms like [question], [write], [read], or raw tool_calls JSON unless recovery is needed.",
+    "If more than one independent tool call is needed, include multiple CALL blocks. Otherwise call the next tool immediately or give the final answer envelope."
   ].join("\n");
 }
 
@@ -485,6 +486,8 @@ function encodeUserMessageForBridge(content, options = {}) {
     "Protocol requirements for your next reply:",
     `- Start with ${TOOL_MODE_MARKER} or ${FINAL_MODE_MARKER}.`,
     `- If you need to inspect, search, read, edit, write, or plan work, reply with ${TOOL_MODE_MARKER}.`,
+    `- Inside ${TOOL_MODE_MARKER}, only use ${CALL_MODE_MARKER} JSON ${CALL_MODE_END_MARKER}.`,
+    "- Do not use [question], [write], [read], or any other bracketed legacy tool format.",
     "- Do not narrate what you are about to do in plain text.",
     firstTurn
       ? "- On the first assistant turn, prefer an immediate tool call over explanation."
@@ -498,11 +501,12 @@ function buildBridgeSystemMessage(tools) {
     "Tool bridge mode is enabled.",
     "The upstream provider's native tool calling is disabled for this request.",
     "Your highest priority is protocol compliance.",
-    "Every reply must begin with one of these exact markers and nothing before them:",
-    `- ${TOOL_MODE_MARKER}`,
-    `- ${FINAL_MODE_MARKER}`,
+    "Only two reply formats are valid.",
+    `1. Tool format: ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER}`,
+    `2. Final format: ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}`,
+    "Do not output anything before the opening marker.",
     "When you want to use a tool, do not answer in normal prose.",
-    `For tool use, reply in this exact envelope and nothing else:`,
+    "Tool format example:",
     TOOL_MODE_MARKER,
     CALL_MODE_MARKER,
     JSON.stringify({ name: "tool_name", arguments: { example: true } }, null, 2),
@@ -514,6 +518,8 @@ function buildBridgeSystemMessage(tools) {
     `- For each tool call, wrap it in ${CALL_MODE_MARKER} and ${CALL_MODE_END_MARKER}.`,
     "- Do not use markdown code fences for tool replies.",
     "- Do not write any explanatory prose before, inside, or after the tool envelope.",
+    "- Do not use legacy bracketed formats like [question], [write], [read], or [toolname].",
+    "- Do not output raw tool_calls JSON unless recovery is needed; CALL blocks are the required format.",
     "- Emit one or more tool calls only when they are independent and can be executed in parallel or as a batch.",
     "- If several reads/searches are needed immediately, include multiple CALL blocks in the same tool envelope.",
     "- If sequencing matters, emit only the next required tool call.",
@@ -521,9 +527,12 @@ function buildBridgeSystemMessage(tools) {
     "- On the first assistant turn for a coding task, usually call a search/read/list tool first.",
     "- Use tool names exactly as listed.",
     "- arguments must be a valid JSON object.",
-    "- The old tool_calls array JSON shape is still accepted, but CALL blocks are preferred.",
+    "- The old tool_calls array JSON shape is still accepted only as a compatibility fallback. Prefer CALL blocks.",
     "Invalid response example:",
     "I will inspect the codebase first.",
+    "Also invalid:",
+    "[question] { ... }",
+    "{\"tool_calls\":[...]}",
     "Valid response example:",
     TOOL_MODE_MARKER,
     CALL_MODE_MARKER,
@@ -1053,6 +1062,21 @@ function extractCompletedToolCallObjectTexts(text) {
   return out;
 }
 
+function extractBracketNamedToolBlock(text) {
+  const source = String(text || "");
+  const match = source.match(/^\s*\[([A-Za-z_][A-Za-z0-9_-]*)\]\s*/);
+  if (!match) return null;
+  const toolName = match[1];
+  const after = source.slice(match[0].length).trimStart();
+  if (!after.startsWith("{") && !after.startsWith("[")) return null;
+  const openChar = after[0];
+  const closeChar = openChar === "{" ? "}" : "]";
+  const segment = extractBalancedSegment(after, 0, openChar, closeChar) || closeUnbalancedJson(after);
+  const parsed = tryParseJsonLenient(segment);
+  if (!parsed.ok) return null;
+  return { name: toolName, arguments: parsed.value };
+}
+
 function extractProgressiveToolCalls(text) {
   const payload = extractPartialToolEnvelope(text);
   if (!payload) return [];
@@ -1169,6 +1193,12 @@ function parseBridgeAssistantText(text) {
     if (typeof embedded.content === "string") {
       return { kind: "final", content: embedded.content };
     }
+  }
+
+  const bracketNamedTool = extractBracketNamedToolBlock(text);
+  if (bracketNamedTool) {
+    const toolCalls = normalizeParsedToolCalls([bracketNamedTool]);
+    if (toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
   }
 
   return { kind: "plain", content: text || "" };
