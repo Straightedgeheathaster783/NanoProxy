@@ -45,7 +45,7 @@ function getBridgeFlavor(modelId) {
 }
 
 function isSingleCallFlavor(flavor) {
-  return flavor === "kimi";
+  return false;
 }
 
 function buildUpstreamUrl(requestPath) {
