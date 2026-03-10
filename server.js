@@ -24,6 +24,9 @@ const FINAL_MODE_END_MARKER = "[[/OPENCODE_FINAL]]";
 const CALL_MODE_MARKER = "[[CALL]]";
 const CALL_MODE_END_MARKER = "[[/CALL]]";
 const MAX_PARALLEL_TOOL_CALLS = 5;
+// Tracks how many times we've enhanced an edit-not-found error per filePath.
+// Capped at 1 to prevent retry loops.
+const editRetryEnhanced = new Map();
 const CALL_MODE_MARKER_ALIASES = ["[CALL]", CALL_MODE_MARKER];
 const CALL_MODE_END_MARKER_ALIASES = ["[/CALL]", CALL_MODE_END_MARKER];
 const TOOL_MODE_MARKER_ALIASES = ["[OPENCODE_TOOL]", TOOL_MODE_MARKER];
@@ -521,9 +524,39 @@ function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
     ? "Reply with exactly one CALL block inside one tool envelope, or one final envelope. Do not batch multiple tool calls in one reply."
     : `If more than one independent tool call is needed, include multiple CALL blocks (up to ${MAX_PARALLEL_TOOL_CALLS} maximum). Do not exceed ${MAX_PARALLEL_TOOL_CALLS} CALL blocks in one reply.`;
   const hasTodo = toolNames.includes("todowrite");
+  const rawContent = contentPartsToText(message.content);
+
+  // Detect oldString-not-found edit errors and inject a recovery hint (max once per filePath)
+  let editRecoveryHint = null;
+  if (
+    message.name === "edit" &&
+    /old.*string.*not found|string to replace|no match|does not contain|oldstring|old_string.*does not|cannot find old/i.test(rawContent)
+  ) {
+    // Best-effort: extract filePath from the previous assistant tool call args, or fall back to "(unknown)"
+    // We use tool_call_id as a stable key per retry
+    const retryKey = message.tool_call_id || "";
+    const alreadyEnhanced = editRetryEnhanced.get(retryKey);
+    if (!alreadyEnhanced) {
+      editRetryEnhanced.set(retryKey, true);
+      // Prune old entries to prevent unbounded growth
+      if (editRetryEnhanced.size > 200) {
+        const firstKey = editRetryEnhanced.keys().next().value;
+        editRetryEnhanced.delete(firstKey);
+      }
+      editRecoveryHint = [
+        "",
+        "[EDIT FAILED — oldString mismatch]",
+        "The `oldString` you provided does not exist verbatim in the file. This is your one automatic recovery hint:",
+        "1. Use the `read` tool to re-read the file and fetch its CURRENT exact content.",
+        "2. Locate the text you want to change and copy it character-for-character, including all whitespace, comment markers (/* */), and punctuation.",
+        "3. Retry the `edit` call with that exact `oldString`. Do not reconstruct it from memory.",
+      ].join("\n");
+    }
+  }
+
   const payload = {
     tool_call_id: message.tool_call_id || "",
-    content: contentPartsToText(message.content)
+    content: rawContent
   };
   return [
     "",
@@ -531,6 +564,7 @@ function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
     `\`\`\`${TOOL_RESULT_LABEL}`,
     JSON.stringify(payload, null, 2),
     "```",
+    editRecoveryHint,
     "",
     "Continue from this tool result.",
     `Your next reply must use exactly one of these formats: ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} or ${FINAL_MODE_MARKER} ... ${FINAL_MODE_END_MARKER}.`,
