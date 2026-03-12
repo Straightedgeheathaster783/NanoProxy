@@ -42,14 +42,37 @@ Notes:
 
 ### Plugin debug logging
 
-Enable debug logging when starting OpenCode:
+Enable debug logging for one OpenCode run:
 
 ```sh
 NANOPROXY_DEBUG=1 opencode
 ```
 
 Optional:
-- set `NANOPROXY_LOG=/path/to/file` to change the log file location
+- set `NANOPROXY_LOG=/path/to/file` to change the single event log file location
+- set `NANOPROXY_LOG_DIR=/path/to/folder` to change where detailed per-request debug files are written
+
+On Windows, you can also use the same persistent toggle used by the standalone server:
+
+```sh
+./toggle-debug.ps1
+```
+
+That writes a `.debug-logging` flag file in the repo. When that flag is present, both:
+- the OpenCode plugin
+- the standalone server
+
+will enable NanoProxy debug logging until you toggle it off again.
+
+When debug mode is enabled, NanoProxy also writes:
+- a single event log file
+- per-request `*-request.json`
+- raw streamed `*-stream.sse`
+- parsed `*-response.json`
+
+By default these go into:
+- event log: your system temp folder as `nanoproxy-plugin.log`
+- detailed logs: your system temp folder under `nanoproxy-plugin-logs`
 
 ## Standalone Server Setup
 
@@ -94,7 +117,9 @@ Or toggle persistently on Windows:
 ./toggle-debug.ps1
 ```
 
-Logs are written to `Logs/`.
+That same toggle also enables plugin debug logging.
+
+Server logs are written to `Logs/`.
 
 ### Health check
 

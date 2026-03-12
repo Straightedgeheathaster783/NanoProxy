@@ -14,12 +14,15 @@
  * calls are emitted as individual deltas when complete envelopes are detected.
  */
 
-import { appendFileSync } from "node:fs"
+import { appendFileSync, existsSync, mkdirSync, writeFileSync } from "node:fs"
 import { fileURLToPath, pathToFileURL } from "node:url"
 import { dirname, join } from "node:path"
+import { tmpdir } from "node:os"
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
+const REPO_ROOT = dirname(__dirname)
+const DEBUG_FLAG_FILE = join(REPO_ROOT, ".debug-logging")
 
 export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
   let core
@@ -48,8 +51,18 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
   }
 
 
-  const LOG_FILE = process.env.NANOPROXY_LOG || "/tmp/nanoproxy-plugin.log"
-  const VERBOSE = process.env.NANOPROXY_DEBUG === "1" || process.env.NANOPROXY_DEBUG === "true"
+  const LOG_FILE = process.env.NANOPROXY_LOG || join(tmpdir(), "nanoproxy-plugin.log")
+  const LOG_DIR = process.env.NANOPROXY_LOG_DIR || join(tmpdir(), "nanoproxy-plugin-logs")
+  const VERBOSE =
+    process.env.NANOPROXY_DEBUG === "1" ||
+    process.env.NANOPROXY_DEBUG === "true" ||
+    existsSync(DEBUG_FLAG_FILE)
+
+  if (VERBOSE) {
+    try {
+      mkdirSync(LOG_DIR, { recursive: true })
+    } catch (e) {}
+  }
 
   function log(obj) {
     try {
@@ -60,6 +73,28 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
   function dbg(obj) {
     if (!VERBOSE) return
     log(obj)
+  }
+
+  function makeRequestId() {
+    return `${new Date().toISOString().replace(/[:.]/g, "-")}-${Math.random().toString(16).slice(2, 10)}`
+  }
+
+  function writeDebugFile(name, content) {
+    if (!VERBOSE) return
+    try {
+      writeFileSync(join(LOG_DIR, name), content)
+    } catch (e) {}
+  }
+
+  function appendDebugFile(name, content) {
+    if (!VERBOSE) return
+    try {
+      appendFileSync(join(LOG_DIR, name), content)
+    } catch (e) {}
+  }
+
+  function writeDebugJson(name, value) {
+    writeDebugFile(name, JSON.stringify(value, null, 2))
   }
 
   log({ event: "init", pid: process.pid, fetch: typeof globalThis.fetch, verbose: VERBOSE, debugEnv: process.env.NANOPROXY_DEBUG })
@@ -92,6 +127,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
     let reasoningSent = 0
     let finalContentSent = 0
     let emittedToolCallCount = 0
+    const rawSseFile = `${dbgData.requestId}-stream.sse`
 
     const flushReasoningDelta = async () => {
       if (aggregate.reasoning.length <= reasoningSent) return
@@ -161,6 +197,13 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
             const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning)
             log({ ...dbgData, event: "stream_done", kind: result.kind })
             dbg({ ...dbgData, event: "stream_raw_content", content: aggregate.content, reasoning: aggregate.reasoning.slice(0, 200) })
+            writeDebugJson(`${dbgData.requestId}-response.json`, {
+              requestId: dbgData.requestId,
+              kind: result.kind,
+              finishReason: aggregate.finishReason,
+              aggregate,
+              parsedResult: result,
+            })
 
             if (result.kind === "tool_calls") {
               const allCalls = result.message.tool_calls || []
@@ -232,6 +275,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
               .map(p => p.trim())
               .find(p => p.startsWith("data:"))
             if (!line) continue
+            appendDebugFile(rawSseFile, eventText + "\n\n")
             const payload = line.slice(5).trim()
             if (!payload || payload === "[DONE]") continue
             const parsed = tryParseJson(payload)
@@ -265,7 +309,8 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
       return originalFetch(input, init, ...rest)
     }
 
-    log({ event: "intercept", url: urlStr, method: init?.method ?? "GET" })
+    const requestId = makeRequestId()
+    log({ event: "intercept", requestId, url: urlStr, method: init?.method ?? "GET" })
 
     const method = String(
       init?.method ?? (input instanceof Request ? input.method : "GET")
@@ -312,9 +357,17 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
 
     log({
       event: "bridge_request",
+      requestId,
       url: urlStr,
       model: parsed.value.model,
       toolCount: parsed.value.tools?.length ?? 0,
+    })
+    writeDebugJson(`${requestId}-request.json`, {
+      requestId,
+      url: urlStr,
+      requestBodyOriginal: parsed.value,
+      requestBodyRewritten: transformed.rewritten,
+      bridgeApplied: transformed.bridgeApplied,
     })
 
     const newBodyText = JSON.stringify(transformed.rewritten)
@@ -339,6 +392,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
 
     const contentType = response.headers.get("content-type") ?? ""
     const dbgData = {
+      requestId,
       url: urlStr,
       status: response.status,
       contentType,
@@ -366,6 +420,11 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
         usage: v.usage,
       })
       dbg({ event: "bridge_json_rewritten", finishReason: choice?.finish_reason })
+      writeDebugJson(`${requestId}-response.json`, {
+        requestId,
+        upstreamResponse: v,
+        rewrittenResponse: bridged,
+      })
       return new Response(JSON.stringify(bridged), {
         status: response.status,
         headers: { "content-type": "application/json" },
