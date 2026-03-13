@@ -43,6 +43,11 @@ function isSingleCallFlavor(flavor) {
   return false;
 }
 
+
+function isEditLikeToolName(name) {
+  const lower = String(name || "").toLowerCase();
+  return lower === "edit" || lower === "patch";
+}
 function clone(value) {
   if (value === undefined) return undefined;
   return JSON.parse(JSON.stringify(value));
@@ -553,7 +558,7 @@ function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
 
   let editRecoveryHint = null;
   if (
-    message.name === "edit" &&
+    isEditLikeToolName(message.name) &&
     /old.*string.*not found|string to replace|no match|does not contain|oldstring|old_string.*does not|cannot find old/i.test(rawContent)
   ) {
     const retryKey = message.tool_call_id || "";
@@ -568,9 +573,9 @@ function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
         "",
         "[EDIT FAILED — oldString mismatch]",
         "The `oldString` you provided does not exist verbatim in the file. This is your one automatic recovery hint:",
-        "1. Use the `read` tool to re-read the file and fetch its CURRENT exact content.",
+        "1. Use the appropriate file-reading tool to re-read the file and fetch its CURRENT exact content.",
         "2. Locate the text you want to change and copy it character-for-character, including all whitespace, comment markers (/* */), and punctuation.",
-        "3. Retry the `edit` call with that exact `oldString`. Do not reconstruct it from memory.",
+        "3. Retry the appropriate file-editing call with that exact `oldString`. Do not reconstruct it from memory.",
       ].join("\n");
     }
   }
@@ -595,13 +600,13 @@ function encodeToolResultBlock(message, flavor = "default", toolNames = []) {
       : null,
     "Do not narrate the next step in plain text.",
     "Do not say what you are about to do.",
-    "For edit calls, oldString must include enough unique surrounding context to match exactly one location.",
+    "For file-editing calls, oldString must include enough unique surrounding context to match exactly one location.",
     "If an edit could match multiple places, read more context first and then send a larger oldString.",
-    "Do not use legacy forms like [question], [write], [read], or raw tool_calls JSON unless recovery is needed.",
+    "Do not use legacy forms like [toolname] { ... } or raw tool_calls JSON unless recovery is needed.",
     nextStepRule,
     hasTodo ? "For complex features, remember to update your structured plan using the todowrite tool as needed." : null,
     toolNames.includes("task") ? "If this result is from a subagent you launched via the 'task' tool, DO NOT duplicate its work. Trust its summary and proceed to the next step of your plan." : null,
-    "If a required detail is genuinely missing or the user must choose between materially different options, prefer the question tool instead of guessing."
+    "If a required detail is genuinely missing or the user must choose between materially different options, prefer the appropriate clarification tool instead of guessing."
   ].filter(Boolean).join("\n");
 }
 
@@ -648,10 +653,10 @@ function encodeUserMessageForBridge(content, options = {}) {
     isSingleCallFlavor(flavor)
       ? `- Do not output a second ${CALL_MODE_MARKER} until the first tool result comes back.`
       : null,
-    "- For edit, use an oldString with enough unique surrounding context to match exactly one place.",
-    "- If an edit target is ambiguous, read more context first instead of guessing a short oldString.",
-    "- If you genuinely need clarification before acting, prefer the question tool instead of guessing.",
-    "- Do not use [question], [write], [read], or any other bracketed legacy tool format.",
+    "- For file-editing calls, use an oldString with enough unique surrounding context to match exactly one place.",
+    "- If a file-editing target is ambiguous, use the appropriate file-reading tool first instead of guessing a short oldString.",
+    "- If you genuinely need clarification before acting, prefer the appropriate clarification tool instead of guessing.",
+    "- Do not use [toolname] or any other bracketed legacy tool format.",
     "- Do not narrate what you are about to do in plain text.",
     `- If you are about to inspect, search, read, edit, write, run commands, or fix something, you must use ${TOOL_MODE_MARKER} instead of prose.`,
     planningHint,
@@ -666,10 +671,10 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     ? { tool_name: "tool_name", tool_input: { example: true } }
     : { name: "tool_name", arguments: { example: true } };
   const validReadExample = flavor === "kimi"
-    ? { tool_name: "read", tool_input: { filePath: "src/app.js" } }
+    ? { tool_name: "tool_name", tool_input: { filePath: "src/app.js" } }
     : { name: "read", arguments: { filePath: "src/app.js" } };
   const validReadExample2 = flavor === "kimi"
-    ? { tool_name: "read", tool_input: { filePath: "src/styles.css" } }
+    ? { tool_name: "tool_name", tool_input: { filePath: "src/styles.css" } }
     : { name: "read", arguments: { filePath: "src/styles.css" } };
   const callCountRule = isSingleCallFlavor(flavor)
     ? "- Emit exactly one CALL block per tool reply."
@@ -700,7 +705,7 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     `- If you emit multiple ${CALL_MODE_MARKER} blocks, fully finish one CALL's JSON object before opening the next ${CALL_MODE_MARKER}.`,
     "- Do not use markdown code fences for tool replies.",
     "- Do not write any explanatory prose before, inside, or after the tool envelope.",
-    "- Do not use legacy bracketed formats like [question], [write], [read], or [toolname].",
+    "- Do not use legacy bracketed formats like [toolname].",
     "- Do not output raw tool_calls JSON unless recovery is needed; CALL blocks are the required format.",
     flavor === "kimi"
       ? "- For Kimi, each CALL JSON object must use tool_name and tool_input. Do not use name/arguments."
@@ -710,9 +715,9 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
       ? `- Do not emit ${CALL_MODE_MARKER} without first emitting ${TOOL_MODE_MARKER}.`
       : null,
     "- If sequencing matters, emit only the next required tool call.",
-    "- For edit, oldString must be unique in the target file. Include enough surrounding context to identify one location.",
-    "- If edit would likely match multiple locations, read more of the file first and then retry with a larger oldString.",
-    "- If important clarification is missing, use the question tool instead of inventing requirements.",
+    "- For file-editing calls, oldString must be unique in the target file. Include enough surrounding context to identify one location.",
+    "- If a file-editing call would likely match multiple locations, use the appropriate file-reading tool first and then retry with a larger oldString.",
+    "- If important clarification is missing, use the appropriate clarification tool instead of inventing requirements.",
     isSingleCallFlavor(flavor)
       ? "- After each tool result, decide the next single tool call or final answer."
       : "- After each tool result, decide the next tool call or CALL batch.",
@@ -724,7 +729,7 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     "Invalid response example:",
     "I will inspect the codebase first.",
     "Also invalid:",
-    "[question] { ... }",
+    "[toolname] { ... }",
     "{\"tool_calls\":[...]}",
     "Valid response example:",
     TOOL_MODE_MARKER,
