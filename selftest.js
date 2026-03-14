@@ -396,6 +396,12 @@ function run() {
   assert.equal(parsedShellAliasCall.kind, "tool_calls");
   assert.equal(parsedShellAliasCall.toolCalls[0].function.name, "bash");
 
+  const parsedReadFileAlias = parseBridgeAssistantText(
+    "[[OPENCODE_TOOL]]\n[[CALL]]\n{\"name\":\"read_file\",\"arguments\":{\"filePath\":\"a.txt\"}}\n[[/CALL]]\n[[/OPENCODE_TOOL]]"
+  );
+  assert.equal(parsedReadFileAlias.kind, "tool_calls");
+  assert.equal(parsedReadFileAlias.toolCalls[0].function.name, "read");
+
   const parsedCanonicalEnvelopeInsideProse = parseBridgeAssistantText(
     "I will do it now.\n[[OPENCODE_TOOL]]\n{\"tool_calls\":[{\"name\":\"read\",\"arguments\":{\"filePath\":\"c.txt\"}}]}\n[[/OPENCODE_TOOL]]\nThanks."
   );

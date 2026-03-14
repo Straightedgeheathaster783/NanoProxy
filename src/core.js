@@ -667,15 +667,34 @@ function encodeUserMessageForBridge(content, options = {}) {
 function buildBridgeSystemMessage(tools, flavor = "default") {
   const catalog = compactToolCatalog(tools);
   const toolNames = tools.map(t => t.function?.name).filter(Boolean);
+  const buildExampleArgs = (schema, depth = 0) => {
+    if (!schema || typeof schema !== "object") return { example: true };
+    if (depth > 2) return {};
+    if (schema.type && schema.type !== "object") return { example: true };
+    const props = schema.properties && typeof schema.properties === "object" ? schema.properties : {};
+    const required = Array.isArray(schema.required) ? schema.required : [];
+    const keys = required.length ? required : Object.keys(props).slice(0, 1);
+    const out = {};
+    for (const key of keys) {
+      const prop = props[key];
+      if (prop && typeof prop === "object") {
+        if (prop.type === "object") out[key] = buildExampleArgs(prop, depth + 1);
+        else if (prop.type === "number" || prop.type === "integer") out[key] = 1;
+        else if (prop.type === "boolean") out[key] = true;
+        else if (Array.isArray(prop.enum) && prop.enum.length > 0) out[key] = prop.enum[0];
+        else out[key] = "example";
+      } else {
+        out[key] = "example";
+      }
+    }
+    return Object.keys(out).length ? out : { example: true };
+  };
+  const exampleTool = tools.find(t => t && t.function && typeof t.function.name === "string");
+  const exampleToolName = exampleTool?.function?.name || "tool_name";
+  const exampleArgs = buildExampleArgs(exampleTool?.function?.parameters);
   const callExample = flavor === "kimi"
-    ? { tool_name: "tool_name", tool_input: { example: true } }
-    : { name: "tool_name", arguments: { example: true } };
-  const validCallExample = flavor === "kimi"
-    ? { tool_name: "tool_name", tool_input: { example: true } }
-    : { name: "tool_name", arguments: { example: true } };
-  const validCallExample2 = flavor === "kimi"
-    ? { tool_name: "tool_name", tool_input: { another_example: true } }
-    : { name: "tool_name", arguments: { another_example: true } };
+    ? { tool_name: exampleToolName, tool_input: exampleArgs }
+    : { name: exampleToolName, arguments: exampleArgs };
   const callCountRule = isSingleCallFlavor(flavor)
     ? "- Emit exactly one CALL block per tool reply."
     : `- You may batch up to ${MAX_TOOL_CALLS_PER_TURN} independent tool calls per reply. Never emit more than ${MAX_TOOL_CALLS_PER_TURN} CALL blocks. If you need more than ${MAX_TOOL_CALLS_PER_TURN}, do the first ${MAX_TOOL_CALLS_PER_TURN} now and continue after results arrive.`;
@@ -735,17 +754,17 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     "Valid response example:",
     TOOL_MODE_MARKER,
     CALL_MODE_MARKER,
-    JSON.stringify(validCallExample, null, 2),
+    JSON.stringify(callExample, null, 2),
     CALL_MODE_END_MARKER,
     TOOL_MODE_END_MARKER,
     ...(!isSingleCallFlavor(flavor) ? [
       "Valid multi-tool example:",
       TOOL_MODE_MARKER,
       CALL_MODE_MARKER,
-      JSON.stringify(validCallExample, null, 2),
+      JSON.stringify(callExample, null, 2),
       CALL_MODE_END_MARKER,
       CALL_MODE_MARKER,
-      JSON.stringify(validCallExample2, null, 2),
+      JSON.stringify(callExample, null, 2),
       CALL_MODE_END_MARKER,
       TOOL_MODE_END_MARKER
     ] : []),
@@ -1136,9 +1155,23 @@ function parseAnyFencedJsonPayload(text) {
 
 function normalizeParsedToolCalls(rawCalls) {
   const shellAliases = new Set(["shell", "sh", "terminal", "command", "commandline", "powershell", "ls", "dir", "find", "cat", "tree", "pwd", "echo", "head", "tail", "mkdir", "rmdir"]);
+  const toolAliases = new Map([
+    ["read_file", "read"],
+    ["write_file", "write"],
+    ["edit_file", "edit"],
+    ["readfile", "read"],
+    ["writefile", "write"],
+    ["editfile", "edit"],
+    ["read-file", "read"],
+    ["write-file", "write"],
+    ["edit-file", "edit"]
+  ]);
   const normalizeToolName = (name) => {
     const raw = String(name || "").trim();
     const lower = raw.toLowerCase();
+    if (toolAliases.has(lower)) {
+      return toolAliases.get(lower);
+    }
     if (shellAliases.has(lower)) {
       return "bash";
     }
@@ -1943,5 +1976,9 @@ module.exports = {
   // Clone utility
   clone
 };
+
+
+
+
 
 
