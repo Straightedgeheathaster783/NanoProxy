@@ -160,6 +160,54 @@ function tryParseJsonLenient(text) {
   return direct;
 }
 
+function repairInvalidJsonEscapesInStrings(text) {
+  const source = String(text || "");
+  let out = "";
+  let inString = false;
+  let escaped = false;
+
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+
+    if (inString) {
+      if (escaped) {
+        out += char;
+        escaped = false;
+        continue;
+      }
+
+      if (char === "\\") {
+        const next = source[i + 1];
+        if (next === undefined) {
+          out += "\\\\";
+          continue;
+        }
+        if ('"\\/bfnrtu'.includes(next)) {
+          out += char;
+          escaped = true;
+          continue;
+        }
+        out += "\\\\";
+        continue;
+      }
+
+      if (char === "\"") {
+        out += char;
+        inString = false;
+        continue;
+      }
+
+      out += char;
+      continue;
+    }
+
+    if (char === "\"") inString = true;
+    out += char;
+  }
+
+  return out;
+}
+
 function decodeJsonStringLiteral(value) {
   try {
     return JSON.parse(`"${String(value || "").replace(/\\/g, "\\\\").replace(/"/g, "\\\"")}"`);
@@ -175,6 +223,39 @@ function normalizeJsonString(value) {
   }
   if (value === undefined) return "{}";
   return JSON.stringify(value);
+}
+
+function decodeBase64ToolArgs(args) {
+  if (!args || typeof args !== "object") return args;
+  const mappings = [
+    ["command_b64", "command"],
+    ["content_b64", "content"],
+    ["oldString_b64", "oldString"],
+    ["newString_b64", "newString"]
+  ];
+  let next = args;
+  let changed = false;
+
+  for (const [encodedKey, plainKey] of mappings) {
+    if (typeof next[plainKey] === "string") continue;
+    if (typeof next[encodedKey] !== "string") continue;
+    const clean = next[encodedKey].replace(/\s+/g, "");
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(clean)) continue;
+    if (clean.length % 4 !== 0) continue;
+    let decoded = null;
+    try {
+      decoded = Buffer.from(clean, "base64").toString("utf8");
+    } catch {
+      continue;
+    }
+    if (decoded === null) continue;
+    if (!changed) next = { ...next };
+    next[plainKey] = decoded;
+    delete next[encodedKey];
+    changed = true;
+  }
+
+  return next;
 }
 
 function extractBalancedSegment(text, startIndex, openChar, closeChar) {
@@ -259,7 +340,7 @@ function salvageMalformedToolCalls(text) {
   return calls.length > 0 ? calls : null;
 }
 
-function bestEffortParseToolPayload(text) {
+function bestEffortParseToolPayload(text, options = {}) {
   const source = String(text || "").trim();
   const wrappedSource = /^[{\[]/.test(source) ? source : `{${source}}`;
   const extractToolCallsFromParsedValue = (value) => {
@@ -270,7 +351,7 @@ function bestEffortParseToolPayload(text) {
       ? normalized.tool_calls
       : (normalized.tool_calls && typeof normalized.tool_calls === "object" ? [normalized.tool_calls] : [])
         .concat(normalized.name ? [normalized] : []);
-    const toolCalls = normalizeParsedToolCalls(rawCalls);
+    const toolCalls = normalizeParsedToolCalls(rawCalls, options);
     return toolCalls.length > 0 ? toolCalls : null;
   };
 
@@ -293,15 +374,24 @@ function bestEffortParseToolPayload(text) {
     const toolCalls = extractToolCallsFromParsedValue(parsedClosed.value);
     if (toolCalls) return toolCalls;
   }
+
+  const repairedTransport = repairInvalidJsonEscapesInStrings(escapeRawControlCharsInStrings(source));
+  if (repairedTransport !== source) {
+    const repairedParsed = tryParseJson(closeUnbalancedJson(repairedTransport));
+    if (repairedParsed.ok && repairedParsed.value && typeof repairedParsed.value === "object") {
+      const toolCalls = extractToolCallsFromParsedValue(repairedParsed.value);
+      if (toolCalls) return toolCalls;
+    }
+  }
   const normalized = parseEmbeddedJsonPayload(text);
   if (normalized && (Array.isArray(normalized.tool_calls) || typeof normalized.name === "string")) {
     const rawCalls = Array.isArray(normalized.tool_calls) ? normalized.tool_calls : [normalized];
-    const toolCalls = normalizeParsedToolCalls(rawCalls);
+    const toolCalls = normalizeParsedToolCalls(rawCalls, options);
     if (toolCalls.length > 0) return toolCalls;
   }
   const salvagedCalls = salvageMalformedToolCalls(text);
   if (salvagedCalls) {
-    const toolCalls = normalizeParsedToolCalls(salvagedCalls);
+    const toolCalls = normalizeParsedToolCalls(salvagedCalls, options);
     if (toolCalls.length > 0) return toolCalls;
   }
   return null;
@@ -439,6 +529,34 @@ function compactToolCatalog(tools) {
   }));
 }
 
+function buildToolArgumentKeyMap(tools) {
+  const map = new Map();
+  for (const tool of tools || []) {
+    const name = String(tool?.function?.name || "").trim().toLowerCase();
+    if (!name) continue;
+    const props = tool?.function?.parameters && typeof tool.function.parameters === "object"
+      ? tool.function.parameters.properties
+      : null;
+    const keys = props && typeof props === "object" && !Array.isArray(props)
+      ? Object.keys(props)
+      : [];
+    map.set(name, new Set(keys));
+  }
+  return map;
+}
+
+function buildToolRequiredKeyMap(tools) {
+  const map = new Map();
+  for (const tool of tools || []) {
+    const name = String(tool?.function?.name || "").trim().toLowerCase();
+    if (!name) continue;
+    const required = tool?.function?.parameters && typeof tool.function.parameters === "object" && Array.isArray(tool.function.parameters.required)
+      ? tool.function.parameters.required
+      : [];
+    map.set(name, new Set(required));
+  }
+  return map;
+}
 function compactSchema(schema, depth = 0) {
   if (!schema || typeof schema !== "object") return { type: "object" };
 
@@ -531,11 +649,7 @@ function encodeToolCallsBlock(toolCalls, flavor = "default") {
     const parsedArgs = typeof call.function.arguments === "string"
       ? (tryParseJson(call.function.arguments).ok ? tryParseJson(call.function.arguments).value : call.function.arguments)
       : (call.function.arguments || {});
-    const payload = {
-      ...(flavor === "kimi"
-        ? { tool_name: call.function.name, tool_input: parsedArgs }
-        : { name: call.function.name, arguments: parsedArgs })
-    };
+    const payload = { name: call.function.name, arguments: parsedArgs };
     return [
       CALL_MODE_MARKER,
       JSON.stringify(payload, null, 2),
@@ -637,10 +751,7 @@ function encodeUserMessageForBridge(content, options = {}) {
       : "- Continue with the next concrete action, not a narration step.");
 
   const taskExample = hasTask
-    ? (flavor === "kimi"
-      ? `\n- If you use the 'task' tool, example format: {"tool_name":"task","tool_input":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
-      : `\n- If you use the 'task' tool, example format: {"name":"task","arguments":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
-    )
+    ? `\n- If you use the 'task' tool, example format: {"name":"task","arguments":{"description":"Write tests for auth.ts","prompt":"Create unit tests for the auth middleware covering edge cases","subagent_type":"general"}}`
     : "";
 
   return [
@@ -662,6 +773,9 @@ function encodeUserMessageForBridge(content, options = {}) {
     "- Do not use [toolname] or any other bracketed legacy tool format.",
     "- Do not narrate what you are about to do in plain text.",
     `- If you are about to inspect, search, read, edit, write, run commands, or fix something, you must use ${TOOL_MODE_MARKER} instead of prose.`,
+    "- For bash calls, always send `command_b64` (base64 UTF-8) instead of raw `command` to avoid JSON quoting issues.",
+    "- For write/edit calls, if `content`, `oldString`, or `newString` is multi-line or contains many backslashes, regexes, or code, you should send `content_b64`, `oldString_b64`, or `newString_b64` (base64 UTF-8) instead of the raw string.",
+    "- For file tools (read/write/edit/patch equivalents), always use workspace-relative paths (like `src/file.js`). Never use absolute paths like `C:/...`, `C:\\...`, or `/...`.",
     toolListLine,
     planningHint,
     taskExample
@@ -694,11 +808,9 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     return Object.keys(out).length ? out : { example: true };
   };
   const exampleTool = tools.find(t => t && t.function && typeof t.function.name === "string");
-  const exampleToolName = exampleTool?.function?.name || "tool_name";
+  const exampleToolName = exampleTool?.function?.name || "tool";
   const exampleArgs = buildExampleArgs(exampleTool?.function?.parameters);
-  const callExample = flavor === "kimi"
-    ? { tool_name: exampleToolName, tool_input: exampleArgs }
-    : { name: exampleToolName, arguments: exampleArgs };
+  const callExample = { name: exampleToolName, arguments: exampleArgs };
   const callCountRule = isSingleCallFlavor(flavor)
     ? "- Emit exactly one CALL block per tool reply."
     : `- You may batch up to ${MAX_TOOL_CALLS_PER_TURN} independent tool calls per reply. Never emit more than ${MAX_TOOL_CALLS_PER_TURN} CALL blocks. If you need more than ${MAX_TOOL_CALLS_PER_TURN}, do the first ${MAX_TOOL_CALLS_PER_TURN} now and continue after results arrive.`;
@@ -731,9 +843,10 @@ function buildBridgeSystemMessage(tools, flavor = "default") {
     "- Do not use legacy bracketed formats like [toolname].",
     "- Do not output raw tool_calls JSON unless recovery is needed; CALL blocks are the required format.",
     "- Never invent tool names. Use one of the listed tool names exactly as provided.",
-    flavor === "kimi"
-      ? "- For Kimi, each CALL JSON object must use tool_name and tool_input. Do not use name/arguments."
-      : "- Each CALL JSON object must use name and arguments. Do not use tool_name/tool_input.",
+    "- Each CALL JSON object must use name and arguments. Do not use tool_name/tool_input.",
+    "- For bash calls, always send `command_b64` (base64 UTF-8) instead of raw `command`.",
+    "- For write/edit calls, if `content`, `oldString`, or `newString` is multi-line or contains many backslashes, regexes, or code, you must send `content_b64`, `oldString_b64`, or `newString_b64` (base64 UTF-8) instead of the raw string.",
+    "- For file tools (read/write/edit/patch equivalents), always use workspace-relative paths (like `src/file.js`). Never use absolute paths like `C:/...`, `C:\\...`, or `/...`.",
     callCountRule,
     isSingleCallFlavor(flavor)
       ? `- Do not emit ${CALL_MODE_MARKER} without first emitting ${TOOL_MODE_MARKER}.`
@@ -1157,32 +1270,158 @@ function parseAnyFencedJsonPayload(text) {
   return null;
 }
 
-function normalizeParsedToolCalls(rawCalls) {
+function normalizeParsedToolCalls(rawCalls, options = {}) {
   const shellAliases = new Set(["shell", "sh", "terminal", "command", "commandline", "powershell", "ls", "dir", "find", "cat", "tree", "pwd", "echo", "head", "tail", "mkdir", "rmdir"]);
   const toolAliases = new Map();
+  const toolArgKeyMap = options.toolArgKeyMap instanceof Map ? options.toolArgKeyMap : new Map();
+  const availableToolNames = new Set(Array.from(toolArgKeyMap.keys(), (k) => String(k || "").toLowerCase()).filter(Boolean));
+  const toolRequiredKeyMap = options.toolRequiredKeyMap instanceof Map ? options.toolRequiredKeyMap : new Map();
+  const fallbackFileArgTools = new Set(["read", "write", "edit", "patch", "read_file", "write_file", "edit_file"]);
+
+  const resolveToolArgKeySet = (toolName) => {
+    const lower = String(toolName || "").toLowerCase();
+    return toolArgKeyMap.get(lower) || null;
+  };
+
+  const resolveToolRequiredKeySet = (toolName) => {
+    const lower = String(toolName || "").toLowerCase();
+    return toolRequiredKeyMap.get(lower) || null;
+  };
+
+  const choosePreferredKey = (toolName, preferredKeys) => {
+    const keySet = resolveToolArgKeySet(toolName);
+    if (keySet && keySet.size > 0) {
+      for (const candidate of preferredKeys) {
+        if (keySet.has(candidate)) return candidate;
+      }
+      return null;
+    }
+    return preferredKeys[0] || null;
+  };
+
+  const aliasValueForKey = (args, aliases) => {
+    for (const alias of aliases) {
+      if (typeof args[alias] === "string") return args[alias];
+    }
+    return undefined;
+  };
+
+  const normalizeFilePathValue = (value) => {
+    if (typeof value !== "string") return value;
+    let next = value.trim();
+    if (!next) return next;
+
+    next = next.replace(/\\/g, "/");
+
+    if (/^[A-Za-z]:\//.test(next)) {
+      const parts = next.slice(3).split("/").filter(Boolean);
+      if (parts.length >= 2) return parts.slice(1).join("/");
+      if (parts.length === 1) return parts[0];
+      return "";
+    }
+
+    return next;
+  };
+
   const normalizeToolName = (name) => {
     const raw = String(name || "").trim();
     const lower = raw.toLowerCase();
+    if (availableToolNames.has(lower)) {
+      return raw;
+    }
     if (toolAliases.has(lower)) {
       return toolAliases.get(lower);
     }
     if (shellAliases.has(lower)) {
-      return "bash";
+      if (availableToolNames.has("bash")) return "bash";
+      if (availableToolNames.has("terminal")) return "terminal";
+      if (availableToolNames.has("shell")) return "shell";
     }
     return raw;
+  };
+
+  const pickNestedArgsCandidate = (toolName, args) => {
+    if (!args || typeof args !== "object" || Array.isArray(args)) return null;
+    const required = resolveToolRequiredKeySet(toolName);
+    const hasOuterRequired = required && required.size > 0
+      ? Array.from(required).every((k) => args[k] !== undefined)
+      : false;
+    if (hasOuterRequired) return null;
+
+    const candidates = ["arguments", "tool_input", "params"];
+    for (const key of candidates) {
+      const nested = args[key];
+      if (!nested || typeof nested !== "object" || Array.isArray(nested)) continue;
+      if (!required || required.size === 0) return nested;
+      const hasNestedRequired = Array.from(required).every((k) => nested[k] !== undefined);
+      if (hasNestedRequired) return nested;
+    }
+    return null;
   };
 
   const wrapShellArgs = (toolName, args) => {
     const lower = String(toolName || "").toLowerCase();
     const isGenericWrapper = ["shell", "sh", "terminal", "command", "commandline", "powershell"].includes(lower);
-    if (shellAliases.has(lower) && !isGenericWrapper) {
+    if (shellAliases.has(lower) && !isGenericWrapper && availableToolNames.has("bash")) {
       const rawPath = args && typeof args === "object"
         ? (args.path || args.filePath || args.directory || args.dir || ".")
         : ".";
-      const safePath = String(rawPath).replace(/[;|&`$"\r\n]/g, "");
+      const safePath = String(rawPath).replace(/[;|&$"\r\n]/g, "");
       return { command: `${lower} "${safePath}"`.trim(), description: `Run ${lower}` };
     }
     return args;
+  };
+
+  const normalizeArgumentAliasesForTool = (toolName, args) => {
+    if (!args || typeof args !== "object" || Array.isArray(args)) return args;
+    const out = { ...args };
+    const lowerTool = String(toolName || "").toLowerCase();
+
+    const fileKey = choosePreferredKey(toolName, ["filePath", "file_path", "filepath", "filename", "file", "path"]);
+    const shouldMapFilePath = fallbackFileArgTools.has(lowerTool) || !!resolveToolArgKeySet(toolName);
+    if (shouldMapFilePath && fileKey && typeof out[fileKey] !== "string") {
+      const fileValue = aliasValueForKey(out, ["filePath", "file_path", "filepath", "filename", "file", "path"]);
+      if (typeof fileValue === "string") out[fileKey] = normalizeFilePathValue(fileValue);
+    } else if (shouldMapFilePath && fileKey && typeof out[fileKey] === "string") {
+      out[fileKey] = normalizeFilePathValue(out[fileKey]);
+    }
+
+    const contentKey = choosePreferredKey(toolName, ["content", "text", "value", "body"]);
+    if (contentKey && typeof out[contentKey] !== "string") {
+      const contentValue = aliasValueForKey(out, ["content", "contents", "text", "value", "body"]);
+      if (typeof contentValue === "string") out[contentKey] = contentValue;
+    }
+
+    const oldKey = choosePreferredKey(toolName, ["oldString", "old_string", "oldText", "old_text", "old", "from"]);
+    if (oldKey && typeof out[oldKey] !== "string") {
+      const oldValue = aliasValueForKey(out, ["oldString", "old_string", "oldstring", "oldText", "old_text", "old", "from"]);
+      if (typeof oldValue === "string") out[oldKey] = oldValue;
+    }
+
+    const newKey = choosePreferredKey(toolName, ["newString", "new_string", "newText", "new_text", "new", "to"]);
+    if (newKey && typeof out[newKey] !== "string") {
+      const newValue = aliasValueForKey(out, ["newString", "new_string", "newstring", "newText", "new_text", "new", "to"]);
+      if (typeof newValue === "string") out[newKey] = newValue;
+    }
+
+    const commandKey = choosePreferredKey(toolName, ["command", "cmd", "script", "input"]);
+    if (commandKey && typeof out[commandKey] !== "string") {
+      const commandValue = aliasValueForKey(out, ["command", "cmd", "script", "input"]);
+      if (typeof commandValue === "string") out[commandKey] = commandValue;
+    }
+
+    const descriptionKey = choosePreferredKey(toolName, ["description", "desc", "purpose", "summary"]);
+    if (descriptionKey && typeof out[descriptionKey] !== "string") {
+      const descriptionValue = aliasValueForKey(out, ["description", "desc", "purpose", "summary"]);
+      if (typeof descriptionValue === "string") {
+        out[descriptionKey] = descriptionValue;
+      } else if (commandKey && typeof out[commandKey] === "string" && out[commandKey].trim()) {
+        const preview = out[commandKey].trim().slice(0, 120);
+        out[descriptionKey] = `Run shell command: ${preview}`;
+      }
+    }
+
+    return out;
   };
 
   return rawCalls
@@ -1196,20 +1435,35 @@ function normalizeParsedToolCalls(rawCalls) {
 
       if (!name) return null;
 
-      const finalArgs = wrapShellArgs(name, args);
+      const nestedArgs = pickNestedArgsCandidate(name, args);
+      const argsForNormalization = nestedArgs || args;
+      const finalArgs = wrapShellArgs(name, argsForNormalization);
+      const aliasNormalizedArgs = normalizeArgumentAliasesForTool(name, finalArgs);
+      const decodedArgs = decodeBase64ToolArgs(aliasNormalizedArgs);
+      const keySet = resolveToolArgKeySet(name);
+      const finalDecodedArgs = (keySet && keySet.size > 0)
+        ? Object.fromEntries(Object.entries(decodedArgs || {}).filter(([k]) => keySet.has(k)))
+        : decodedArgs;
+      const requiredSet = resolveToolRequiredKeySet(name);
+      if (requiredSet && requiredSet.size > 0) {
+        for (const requiredKey of requiredSet) {
+          if (finalDecodedArgs == null || finalDecodedArgs[requiredKey] === undefined) {
+            return null;
+          }
+        }
+      }
 
       return {
         id: generateToolCallId(),
         type: "function",
         function: {
           name: normalizeToolName(name),
-          arguments: normalizeJsonString(finalArgs)
+          arguments: normalizeJsonString(finalDecodedArgs)
         }
       };
     })
     .filter(Boolean);
 }
-
 function startsWithMarker(text, marker) {
   return String(text || "").trimStart().startsWith(marker);
 }
@@ -1304,8 +1558,8 @@ function normalizeBridgeMarkers(text) {
   source = source.replace(/\[?\[?\s*\/\s*OPENCODE_TOOLS?\s*\]?\]?/gi, TOOL_MODE_END_MARKER);
   source = source.replace(/\[?\[?\s*OPENCODE_FINAL\s*\]?\]?/gi, FINAL_MODE_MARKER);
   source = source.replace(/\[?\[?\s*\/\s*OPENCODE_FINAL\s*\]?\]?/gi, FINAL_MODE_END_MARKER);
-  source = source.replace(/\[\[?\s*CALL\s*\]?\]?/gi, CALL_MODE_MARKER);
-  source = source.replace(/\[\[?\s*\/\s*CALL\s*\]?\]?/gi, CALL_MODE_END_MARKER);
+  source = source.replace(/(^|[\r\n])\s*\[\[?\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/gim, `$1${CALL_MODE_MARKER}\n`);
+  source = source.replace(/(^|[\r\n])\s*\[\[?\s*\/\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/gim, `$1${CALL_MODE_END_MARKER}\n`);
   return source;
 }
 
@@ -1433,7 +1687,7 @@ function extractCallEnvelopes(text, allowPartial = false, includeMeta = false) {
   return out;
 }
 
-function salvageBoundaryClosedToolCalls(envelopeText) {
+function salvageBoundaryClosedToolCalls(envelopeText, options = {}) {
   const source = String(envelopeText || "").trim();
   if (!source) return null;
 
@@ -1444,17 +1698,17 @@ function salvageBoundaryClosedToolCalls(envelopeText) {
   }
 
   for (const attempt of attempts) {
-    const toolCalls = bestEffortParseToolPayload(attempt);
+    const toolCalls = bestEffortParseToolPayload(attempt, options);
     if (toolCalls && toolCalls.length > 0) return toolCalls;
   }
 
   return null;
 }
 
-function parseCallEnvelopeWithFallback(envelopeText, allowSalvage = true) {
-  let toolCalls = bestEffortParseToolPayload(envelopeText);
+function parseCallEnvelopeWithFallback(envelopeText, allowSalvage = true, options = {}) {
+  let toolCalls = bestEffortParseToolPayload(envelopeText, options);
   if ((!toolCalls || toolCalls.length === 0) && allowSalvage) {
-    toolCalls = salvageBoundaryClosedToolCalls(envelopeText);
+    toolCalls = salvageBoundaryClosedToolCalls(envelopeText, options);
   }
   return toolCalls;
 }
@@ -1535,7 +1789,7 @@ function extractBracketNamedToolBlock(text) {
   return { name: toolName, arguments: parsed.value };
 }
 
-function extractProgressiveToolCalls(text) {
+function extractProgressiveToolCalls(text, options = {}) {
   const payload = extractProgressiveToolSource(text);
   if (!payload) return [];
 
@@ -1543,7 +1797,7 @@ function extractProgressiveToolCalls(text) {
   if (callEnvelopes.length > 0) {
     const recovered = [];
     for (const envelope of callEnvelopes) {
-      const toolCalls = parseCallEnvelopeWithFallback(envelope.text, true);
+      const toolCalls = parseCallEnvelopeWithFallback(envelope.text, true, options);
       if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
     }
     if (recovered.length > 0) return recovered;
@@ -1552,13 +1806,31 @@ function extractProgressiveToolCalls(text) {
   const objectTexts = extractCompletedToolCallObjectTexts(payload);
   const recovered = [];
   for (const objectText of objectTexts) {
-    const toolCalls = bestEffortParseToolPayload(objectText);
+    const toolCalls = bestEffortParseToolPayload(objectText, options);
     if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
   }
   return recovered;
 }
 
-function parseBridgeAssistantText(text) {
+function buildInvalidToolBlockRecoveryRequest(upstreamRequest) {
+  const recovered = JSON.parse(JSON.stringify(upstreamRequest || {}));
+  if (!Array.isArray(recovered.messages)) recovered.messages = [];
+  recovered.messages.push({
+    role: "user",
+    content: [
+      "Parser error: your previous reply contained an unparseable tool envelope.",
+      "Retry immediately with a valid tool call envelope only.",
+      `Use ${TOOL_MODE_MARKER} ... ${TOOL_MODE_END_MARKER} and ${CALL_MODE_MARKER} ... ${CALL_MODE_END_MARKER}.`,
+      "Inside CALL JSON use exactly: {\"name\":\"<tool>\",\"arguments\":{...}}.",
+      "For bash, include both command and description when required by schema.",
+      "For string-heavy arguments prefer base64 fields (command_b64/content_b64/oldString_b64/newString_b64).",
+      "Do not output prose before or after the tool envelope."
+    ].join("\n")
+  });
+  return recovered;
+}
+
+function parseBridgeAssistantText(text, options = {}) {
   const normalizedText = normalizeBridgeMarkers(text);
   const canonicalTool = extractAnyMarkerEnvelope(normalizedText, TOOL_MODE_MARKER_ALIASES, TOOL_MODE_END_MARKER_ALIASES);
   if (canonicalTool !== null) {
@@ -1566,12 +1838,12 @@ function parseBridgeAssistantText(text) {
     if (callEnvelopes.length > 0) {
       const recovered = [];
       for (const envelope of callEnvelopes) {
-        const toolCalls = parseCallEnvelopeWithFallback(envelope, true);
+        const toolCalls = parseCallEnvelopeWithFallback(envelope, true, options);
         if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
       }
       if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
     }
-    const toolCalls = bestEffortParseToolPayload(canonicalTool);
+    const toolCalls = bestEffortParseToolPayload(canonicalTool, options);
     if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
     return { kind: "invalid_tool_block", raw: normalizedText };
   }
@@ -1582,12 +1854,12 @@ function parseBridgeAssistantText(text) {
     if (callEnvelopes.length > 0) {
       const recovered = [];
       for (const envelope of callEnvelopes) {
-        const toolCalls = parseCallEnvelopeWithFallback(envelope, true);
+        const toolCalls = parseCallEnvelopeWithFallback(envelope, true, options);
         if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
       }
       if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
     }
-    const toolCalls = bestEffortParseToolPayload(looseTool);
+    const toolCalls = bestEffortParseToolPayload(looseTool, options);
     if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
     return { kind: "invalid_tool_block", raw: normalizedText };
   }
@@ -1596,7 +1868,7 @@ function parseBridgeAssistantText(text) {
   if (callOnlyEnvelopes.length > 0) {
     const recovered = [];
     for (const envelope of callOnlyEnvelopes) {
-      const toolCalls = parseCallEnvelopeWithFallback(envelope, true);
+      const toolCalls = parseCallEnvelopeWithFallback(envelope, true, options);
       if (toolCalls && toolCalls.length > 0) recovered.push(...toolCalls);
     }
     if (recovered.length > 0) return { kind: "tool_calls", toolCalls: recovered };
@@ -1613,7 +1885,7 @@ function parseBridgeAssistantText(text) {
   }
 
   if (startsWithAnyMarker(normalizedText, TOOL_MODE_MARKER_ALIASES)) {
-    return parseBridgeAssistantText(stripAnyMarker(normalizedText, TOOL_MODE_MARKER_ALIASES));
+    return parseBridgeAssistantText(stripAnyMarker(normalizedText, TOOL_MODE_MARKER_ALIASES), options);
   }
 
   if (startsWithAnyMarker(normalizedText, FINAL_MODE_MARKER_ALIASES)) {
@@ -1622,7 +1894,7 @@ function parseBridgeAssistantText(text) {
 
   const toolBlock = extractFencedBlock(normalizedText, TOOL_BLOCK_LABEL);
   if (toolBlock) {
-    const toolCalls = bestEffortParseToolPayload(toolBlock);
+    const toolCalls = bestEffortParseToolPayload(toolBlock, options);
     if (toolCalls && toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
   }
 
@@ -1639,7 +1911,7 @@ function parseBridgeAssistantText(text) {
   if (fencedJson) {
     if (Array.isArray(fencedJson.tool_calls) || typeof fencedJson.name === "string") {
       const rawCalls = Array.isArray(fencedJson.tool_calls) ? fencedJson.tool_calls : [fencedJson];
-      const toolCalls = normalizeParsedToolCalls(rawCalls);
+      const toolCalls = normalizeParsedToolCalls(rawCalls, options);
       if (toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
     }
     if (typeof fencedJson.content === "string") {
@@ -1653,7 +1925,7 @@ function parseBridgeAssistantText(text) {
       const rawCalls = Array.isArray(embedded.tool_calls)
         ? embedded.tool_calls
         : [embedded];
-      const toolCalls = normalizeParsedToolCalls(rawCalls);
+      const toolCalls = normalizeParsedToolCalls(rawCalls, options);
       if (toolCalls.length > 0) {
         return { kind: "tool_calls", toolCalls };
       }
@@ -1668,6 +1940,17 @@ function parseBridgeAssistantText(text) {
   if (bracketNamedTool) {
     const toolCalls = normalizeParsedToolCalls([bracketNamedTool]);
     if (toolCalls.length > 0) return { kind: "tool_calls", toolCalls };
+  }
+
+  const hasLooseToolOpen = LOOSE_TOOL_START_REGEX.test(normalizedText);
+  const hasLooseToolClose = LOOSE_TOOL_END_REGEX.test(normalizedText);
+  const hasStandaloneCallOpen = /(^|[\r\n])\s*\[\[?\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/im.test(normalizedText);
+  const hasStandaloneCallClose = /(^|[\r\n])\s*\[\[?\s*\/\s*CALL\s*\]?\]?\s*(?=$|[\r\n])/im.test(normalizedText);
+  const looksLikeUnparsedToolEnvelope =
+    (hasLooseToolOpen && (hasLooseToolClose || hasStandaloneCallOpen))
+    || (hasStandaloneCallOpen && hasStandaloneCallClose);
+  if (looksLikeUnparsedToolEnvelope) {
+    return { kind: "invalid_tool_block", raw: normalizedText };
   }
 
   return { kind: "plain", content: normalizedText || "" };
@@ -1712,8 +1995,14 @@ function parseSSETranscript(text) {
   return aggregate;
 }
 
-function buildBridgeResultFromText(text, reasoning) {
-  const parsed = parseBridgeAssistantText(text);
+function buildBridgeResultFromText(text, reasoning, options = {}) {
+  const parsed = parseBridgeAssistantText(text, options);
+  const reasoningText = typeof reasoning === "string" ? reasoning : "";
+  const reasoningLooksLikeBridge = /(\[\[?\s*OPENCODE_(?:TOOL|FINAL)|\[\[?\s*CALL)/i.test(reasoningText);
+  const reasoningParsed = reasoningLooksLikeBridge
+    ? parseBridgeAssistantText(reasoningText, options)
+    : null;
+
   if (parsed.kind === "tool_calls") {
     return {
       kind: "tool_calls",
@@ -1727,19 +2016,44 @@ function buildBridgeResultFromText(text, reasoning) {
     };
   }
 
+  let finalParsed = parsed;
+  const parsedHasFinalText = parsed.kind === "final" && String(parsed.content || "").trim().length > 0;
+  const reasoningHasFinalText = reasoningParsed && reasoningParsed.kind === "final" && String(reasoningParsed.content || "").trim().length > 0;
+  const normalizedReasoning = normalizeBridgeMarkers(reasoningText);
+  const reasoningFinalStart = normalizedReasoning.indexOf(FINAL_MODE_MARKER);
+  const reasoningFinalEnd = reasoningFinalStart === -1
+    ? -1
+    : normalizedReasoning.indexOf(FINAL_MODE_END_MARKER, reasoningFinalStart + FINAL_MODE_MARKER.length);
+  const reasoningHasClosedFinalBlock = reasoningFinalStart !== -1 && reasoningFinalEnd !== -1;
+  if (!parsedHasFinalText && reasoningHasFinalText && reasoningHasClosedFinalBlock) {
+    finalParsed = reasoningParsed;
+  }
+
+  if (finalParsed.kind === "invalid_tool_block") {
+    return {
+      kind: "invalid_tool_block",
+      message: {
+        role: "assistant",
+        content: "Tool call payload was malformed and could not be parsed. Retry the same call with base64 fields for code-heavy strings (`command_b64`, `content_b64`, `oldString_b64`, `newString_b64`).",
+        reasoning_content: reasoning || ""
+      },
+      finishReason: "stop"
+    };
+  }
+
   return {
     kind: "final",
     message: {
       role: "assistant",
-      content: stripAllTrailingFinalMarkerJunk(stripLeadingMarkerJunk(parsed.kind === "final" ? parsed.content : (parsed.content || text || ""))),
+      content: stripAllTrailingFinalMarkerJunk(stripLeadingMarkerJunk(finalParsed.kind === "final" ? finalParsed.content : (finalParsed.content || text || ""))),
       reasoning_content: reasoning || ""
     },
     finishReason: "stop"
   };
 }
 
-function buildChatCompletionFromBridge(aggregate) {
-  const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning);
+function buildChatCompletionFromBridge(aggregate, options = {}) {
+  const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning, options);
   const response = {
     id: aggregate.id || `chatcmpl_${randomUUID()}`,
     object: "chat.completion",
@@ -1795,8 +2109,8 @@ function extractStreamableFinalContent(content) {
   return stripAllTrailingFinalMarkerJunk(stripLeadingMarkerJunk(visible));
 }
 
-function buildSSEFromBridge(aggregate) {
-  const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning);
+function buildSSEFromBridge(aggregate, options = {}) {
+  const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning, options);
   const id = aggregate.id || `chatcmpl_${randomUUID()}`;
   const model = aggregate.model || "tool-bridge";
   const created = aggregate.created || Math.floor(Date.now() / 1000);
@@ -1899,6 +2213,8 @@ module.exports = {
   normalizeTools,
   normalizeToolDefinition,
   compactToolCatalog,
+  buildToolArgumentKeyMap,
+  buildToolRequiredKeyMap,
   compactSchema,
   contentPartsToText,
   buildBridgeSystemMessage,
@@ -1917,6 +2233,7 @@ module.exports = {
   extractProgressiveToolCalls,
   isEmptyBridgeStopAggregate,
   buildEmptyStopRecoveryRequest,
+  buildInvalidToolBlockRecoveryRequest,
 
   // SSE utilities
   sseLine,
@@ -1970,6 +2287,8 @@ module.exports = {
   // Clone utility
   clone
 };
+
+
 
 
 

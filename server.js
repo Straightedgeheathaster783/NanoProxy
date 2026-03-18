@@ -19,6 +19,7 @@ const {
   buildChatCompletionFromBridge,
   buildSSEFromBridge,
   buildEmptyStopRecoveryRequest,
+  buildInvalidToolBlockRecoveryRequest,
   isEmptyBridgeStopAggregate,
   extractProgressiveToolCalls,
   sseLine,
@@ -30,7 +31,9 @@ const {
   clone,
   MAX_TOOL_CALLS_PER_TURN,
   acceptNativeJson,
-  acceptNativeSSE
+  acceptNativeSSE,
+  buildToolArgumentKeyMap,
+  buildToolRequiredKeyMap
 } = core;
 
 const LISTEN_HOST = process.env.PROXY_HOST || "127.0.0.1";
@@ -157,7 +160,8 @@ async function proxyRequest(req, res) {
     bridgeMeta = {
       bridgeApplied: transformed.bridgeApplied,
       originalRequest: reqParsed.value,
-      upstreamRequest: transformed.rewritten
+      upstreamRequest: transformed.rewritten,
+      normalizedTools: transformed.normalizedTools
     };
     if (transformed.bridgeApplied || transformed.changes.length > 0) {
       upstreamBuffer = Buffer.from(JSON.stringify(transformed.rewritten), "utf8");
@@ -179,6 +183,10 @@ async function proxyRequest(req, res) {
   if (attemptNativeFirst) {
     appendActivity(`request.native_attempt id=${requestId} status=${upstreamResponse.status}`);
     const contentType = upstreamResponse.headers.get("content-type") || "";
+  const parseOptions = {
+    toolArgKeyMap: buildToolArgumentKeyMap((bridgeMeta && Array.isArray(bridgeMeta.normalizedTools)) ? bridgeMeta.normalizedTools : []),
+    toolRequiredKeyMap: buildToolRequiredKeyMap((bridgeMeta && Array.isArray(bridgeMeta.normalizedTools)) ? bridgeMeta.normalizedTools : [])
+  };
     let nativeSucceeded = false;
     let bufferedBody = null;
     let bufferedText = "";
@@ -222,7 +230,8 @@ async function proxyRequest(req, res) {
     bridgeMeta = {
       bridgeApplied: transformed.bridgeApplied,
       originalRequest: reqParsed.value,
-      upstreamRequest: transformed.rewritten
+      upstreamRequest: transformed.rewritten,
+      normalizedTools: transformed.normalizedTools
     };
     upstreamBuffer = Buffer.from(JSON.stringify(transformed.rewritten), "utf8");
     
@@ -235,6 +244,10 @@ async function proxyRequest(req, res) {
   }
 
   const contentType = upstreamResponse.headers.get("content-type") || "";
+  const parseOptions = {
+    toolArgKeyMap: buildToolArgumentKeyMap((bridgeMeta && Array.isArray(bridgeMeta.normalizedTools)) ? bridgeMeta.normalizedTools : []),
+    toolRequiredKeyMap: buildToolRequiredKeyMap((bridgeMeta && Array.isArray(bridgeMeta.normalizedTools)) ? bridgeMeta.normalizedTools : [])
+  };
   if (contentType.includes("text/event-stream")) {
     appendActivity(`request.stream_buffered id=${requestId} status=${upstreamResponse.status}`);
     appendTextLog(
@@ -324,7 +337,7 @@ async function proxyRequest(req, res) {
     };
 
     const flushProgressiveToolCalls = (aggregate) => {
-      const progressiveCalls = extractProgressiveToolCalls(aggregate.content);
+      const progressiveCalls = extractProgressiveToolCalls(aggregate.content, parseOptions);
       if (progressiveCalls.length <= emittedToolCalls) return;
       ensureRole(aggregate);
       for (let i = emittedToolCalls; i < progressiveCalls.length; i++) {
@@ -431,8 +444,34 @@ async function proxyRequest(req, res) {
     }
 
     if (!roleSent) ensureRole(aggregate);
-    const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning);
-    if (result.kind === "final") {
+    let result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning, parseOptions);
+    if (result.kind === "invalid_tool_block" && bridgeMeta && bridgeMeta.upstreamRequest) {
+      appendActivity(`request.invalid_tool_block id=${requestId}`);
+      const retryRequest = buildInvalidToolBlockRecoveryRequest(bridgeMeta.upstreamRequest);
+      const retryBuffer = Buffer.from(JSON.stringify(retryRequest), "utf8");
+      appendTextLog(streamLogPath, "\n# recovery-attempt=invalid_tool_block\n");
+      const retryResponse = await fetch(upstreamUrl, {
+        method: req.method,
+        headers: buildUpstreamHeaders(req.headers, retryBuffer.length),
+        body: ["GET", "HEAD"].includes(req.method) ? undefined : retryBuffer
+      });
+      appendActivity(`request.invalid_tool_recovery id=${requestId} status=${retryResponse.status}`);
+      if ((retryResponse.headers.get("content-type") || "").includes("text/event-stream")) {
+        aggregate = {
+          id: null,
+          model: null,
+          created: null,
+          reasoning: "",
+          content: "",
+          finishReason: null,
+          usage: undefined
+        };
+        emittedToolCalls = 0;
+        await consumeBridgeStream(retryResponse, "invalid_tool_recovery");
+        result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning, parseOptions);
+      }
+    }
+    if (result.kind === "final" || result.kind === "invalid_tool_block") {
       const finalText = extractStreamableFinalContent(aggregate.content) || result.message.content || "";
       if (finalText) {
         writeDownstream(sseLine({
@@ -521,7 +560,7 @@ async function proxyRequest(req, res) {
         finishReason: choice ? choice.finish_reason : null,
         usage: currentResponse.usage
       };
-      const bridged = buildChatCompletionFromBridge(aggregate);
+      const bridged = buildChatCompletionFromBridge(aggregate, parseOptions);
       responseLog.responseChanges = ["bridge response synthesized from custom text protocol"];
       responseLog.responseBodyRewritten = bridged;
       finalText = JSON.stringify(bridged);
@@ -611,4 +650,6 @@ module.exports = {
   // Re-export core functions for plugin use
   ...core
 };
+
+
 

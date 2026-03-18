@@ -49,6 +49,9 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
   const extractCallEnvelopes = core.extractCallEnvelopes
   const extractStreamableFinalContent = core.extractStreamableFinalContent
   const MAX_TOOL_CALLS_PER_TURN = core.MAX_TOOL_CALLS_PER_TURN
+  const buildToolArgumentKeyMap = core.buildToolArgumentKeyMap
+  const buildToolRequiredKeyMap = core.buildToolRequiredKeyMap
+  const buildInvalidToolBlockRecoveryRequest = core.buildInvalidToolBlockRecoveryRequest
 
   if (typeof requestNeedsBridge !== "function" || typeof transformRequestForBridge !== "function") {
     return {}
@@ -122,8 +125,10 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
     return `data: ${JSON.stringify(payload)}\n\n`
   }
 
-  async function processStreamingResponse(response, dbgData) {
-    const reader = response.body.getReader()
+  async function processStreamingResponse(response, dbgData, parseOptions = {}, onInvalidToolBlockRetry = null) {
+    let reader = response.body.getReader()
+    let invalidRetryUsed = false
+    let droppedCallsRetryUsed = false
     const decoder = new TextDecoder()
 
     const { readable, writable } = new TransformStream()
@@ -197,7 +202,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
     }
 
     const flushProgressiveToolCallsFunc = async () => {
-      const calls = extractProgressiveToolCalls(aggregate.content)
+      const calls = extractProgressiveToolCalls(aggregate.content, parseOptions)
       if (calls.length <= emittedToolCallCount) return
       dbg({ ...dbgData, event: "stream_progressive_calls", total: calls.length, new: calls.length - emittedToolCallCount, source: "content" })
       for (let i = emittedToolCallCount; i < calls.length; i++) {
@@ -246,15 +251,36 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
           const { done, value } = await reader.read()
 
           if (done) {
-            const result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning)
+            let result = buildBridgeResultFromText(aggregate.content, aggregate.reasoning, parseOptions)
             log({ ...dbgData, event: "stream_done", kind: result.kind })
             dbg({ ...dbgData, event: "stream_raw_content", content: aggregate.content, reasoning: aggregate.reasoning.slice(0, 200) })
+            if (result.kind === "invalid_tool_block" && !invalidRetryUsed && typeof onInvalidToolBlockRetry === "function") {
+              dbg({ ...dbgData, event: "stream_invalid_tool_block_retry" })
+              const retryResponse = await onInvalidToolBlockRetry()
+              if (retryResponse && (retryResponse.headers.get("content-type") || "").includes("text/event-stream")) {
+                invalidRetryUsed = true
+                reader = retryResponse.body.getReader()
+                rawBuffer = ""
+                reasoningSent = 0
+                finalContentSent = 0
+                emittedToolCallCount = 0
+                aggregate.id = null
+                aggregate.model = null
+                aggregate.created = null
+                aggregate.reasoning = ""
+                aggregate.content = ""
+                aggregate.finishReason = null
+                aggregate.usage = undefined
+                continue
+              }
+            }
+            let rawClosedCallCount = 0
+            let parsedCallCount = result.kind === "tool_calls"
+              ? (result.message.tool_calls || []).length
+              : 0
             try {
-              const rawClosedCallCount = typeof extractCallEnvelopes === "function"
+              rawClosedCallCount = typeof extractCallEnvelopes === "function"
                 ? extractCallEnvelopes(aggregate.content, false, false).length
-                : 0
-              const parsedCallCount = result.kind === "tool_calls"
-                ? (result.message.tool_calls || []).length
                 : 0
               if (rawClosedCallCount > parsedCallCount) {
                 dbg({
@@ -265,6 +291,31 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
                 })
               }
             } catch (e) {}
+            if (rawClosedCallCount > parsedCallCount && !droppedCallsRetryUsed && typeof onInvalidToolBlockRetry === "function") {
+              dbg({
+                ...dbgData,
+                event: "stream_dropped_calls_retry",
+                rawClosedCallCount,
+                parsedCallCount
+              })
+              const retryResponse = await onInvalidToolBlockRetry()
+              if (retryResponse && (retryResponse.headers.get("content-type") || "").includes("text/event-stream")) {
+                droppedCallsRetryUsed = true
+                reader = retryResponse.body.getReader()
+                rawBuffer = ""
+                reasoningSent = 0
+                finalContentSent = 0
+                emittedToolCallCount = 0
+                aggregate.id = null
+                aggregate.model = null
+                aggregate.created = null
+                aggregate.reasoning = ""
+                aggregate.content = ""
+                aggregate.finishReason = null
+                aggregate.usage = undefined
+                continue
+              }
+            }
             writeDebugJson(`${dbgData.requestId}-response.json`, {
               requestId: dbgData.requestId,
               kind: result.kind,
@@ -510,6 +561,10 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
     }
 
     const transformed = transformRequestForBridge(parsed.value, { forceBridge: !shouldBridgeImmediately })
+    const parseOptions = {
+      toolArgKeyMap: buildToolArgumentKeyMap(Array.isArray(transformed.normalizedTools) ? transformed.normalizedTools : []),
+      toolRequiredKeyMap: buildToolRequiredKeyMap(Array.isArray(transformed.normalizedTools) ? transformed.normalizedTools : [])
+    }
     if (!transformed.bridgeApplied) {
       log({ event: "bridge_skipped", url: urlStr, reason: "no tools or no model match" })
       return originalFetch(input, init, ...rest)
@@ -561,7 +616,20 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
     dbg({ event: "bridge_response", ...dbgData })
 
     if (contentType.includes("text/event-stream")) {
-      return processStreamingResponse(response, dbgData)
+      const retryInvalidToolBlock = async () => {
+        const retryPayload = buildInvalidToolBlockRecoveryRequest(transformed.rewritten)
+        const retryText = JSON.stringify(retryPayload)
+        const retryBytes = new TextEncoder().encode(retryText)
+        const retryHeaders = new Headers(headers)
+        retryHeaders.set("content-length", String(retryBytes.length))
+        return originalFetch(urlStr, {
+          ...init,
+          method: "POST",
+          headers: retryHeaders,
+          body: retryBytes,
+        })
+      }
+      return processStreamingResponse(response, dbgData, parseOptions, retryInvalidToolBlock)
     }
 
     const responseText = await response.text()
@@ -578,7 +646,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
         content: msg.content ?? "",
         finishReason: choice?.finish_reason,
         usage: v.usage,
-      })
+      }, parseOptions)
       dbg({ event: "bridge_json_rewritten", finishReason: choice?.finish_reason })
       writeDebugJson(`${requestId}-response.json`, {
         requestId,
@@ -602,5 +670,7 @@ export const NanoProxyPlugin = async function NanoProxyPlugin(ctx) {
 }
 
 export default NanoProxyPlugin;
+
+
 
 

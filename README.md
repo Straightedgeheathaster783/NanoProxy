@@ -192,12 +192,18 @@ So your client still sees normal tool calls, but NanoGPT does not have to rely o
 
 ## Bridge format
 
+NanoProxy asks the model to emit a strict text envelope, then converts that back into normal OpenAI-style `tool_calls`.
+
+Important:
+- The actual tool names and argument keys come from your client/tool schema.
+- The examples below are format examples only.
+
 Tool reply:
 
 ```text
 [[OPENCODE_TOOL]]
 [[CALL]]
-{"name": "tool_name", "arguments": {"example": true}}
+{"name": "bash", "arguments": {"command": "pwd", "description": "Print working directory"}}
 [[/CALL]]
 [[/OPENCODE_TOOL]]
 ```
@@ -207,10 +213,10 @@ Multiple independent tool calls in one turn:
 ```text
 [[OPENCODE_TOOL]]
 [[CALL]]
-{"name": "tool_name", "arguments": {"example": true}}
+{"name": "read", "arguments": {"filePath": "README.md"}}
 [[/CALL]]
 [[CALL]]
-{"name": "tool_name", "arguments": {"another_example": true}}
+{"name": "write", "arguments": {"filePath": "notes.txt", "content": "hello"}}
 [[/CALL]]
 [[/OPENCODE_TOOL]]
 ```
@@ -230,6 +236,9 @@ Your answer here.
 - Tool and final content are buffered until NanoProxy can classify them safely.
 - By default, NanoProxy allows up to 5 tool calls in a single assistant turn for models that behave well with batching.
 - Some models may still behave better with one tool call per turn.
+- NanoProxy accepts both wrapped tool blocks and looser marker variants when recovering malformed output.
+- If the model emits an unparseable tool envelope, NanoProxy does a one-shot recovery retry instead of just leaking the raw block to the client.
+- For string-heavy tool arguments, NanoProxy may instruct the model to use base64 helper fields such as `command_b64` or `content_b64` when that better preserves payload integrity.
 
 ## Project Structure
 
@@ -250,6 +259,8 @@ NanoProxy/
 
 ```sh
 node --check server.js
+node --check src/core.js
+node --check src/plugin.mjs
 node selftest.js
 ```
 

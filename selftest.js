@@ -1,6 +1,7 @@
 "use strict";
 
 const assert = require("node:assert/strict");
+const core = require("./src/core");
 const {
   buildBridgeResultFromText,
   buildEmptyStopRecoveryRequest,
@@ -301,6 +302,11 @@ function run() {
   assert.equal(parsedBrokenToolMarker.kind, "tool_calls");
   assert.equal(parsedBrokenToolMarker.toolCalls[0].function.name, "write");
 
+  const parsedUnparseableToolEnvelope = parseBridgeAssistantText(
+    "[OPENCODE_TOOL]\n[CALL]\n{\"name\":\"bash\",\"arguments\":{\"command_b64\":\"abc\"\n[/CALL]\n[/OPENCODE_TOOL]"
+  );
+  assert.equal(parsedUnparseableToolEnvelope.kind, "invalid_tool_block");
+
   const parsedFinalMarker = parseBridgeAssistantText(
     "[[OPENCODE_FINAL]]\nDone.\n[[/OPENCODE_FINAL]]"
   );
@@ -385,6 +391,37 @@ function run() {
   );
   assert.equal(parsedLegacyWriteWithToolInput.kind, "tool_calls");
   assert.equal(parsedLegacyWriteWithToolInput.toolCalls[0].function.name, "write");
+
+  const nestedArgsSchema = [
+    {
+      type: "function",
+      function: {
+        name: "write",
+        parameters: {
+          type: "object",
+          properties: {
+            filePath: { type: "string" },
+            content: { type: "string" }
+          },
+          required: ["filePath", "content"]
+        }
+      }
+    }
+  ];
+  const nestedArgsOptions = {
+    toolArgKeyMap: core.buildToolArgumentKeyMap(nestedArgsSchema),
+    toolRequiredKeyMap: core.buildToolRequiredKeyMap(nestedArgsSchema)
+  };
+  const parsedNestedArgumentsCall = parseBridgeAssistantText(
+    "[[OPENCODE_TOOL]]\n[[CALL]]\n{\"name\":\"write\",\"arguments\":{\"arguments\":{\"filePath\":\"src/csv.js\",\"content\":\"export const ok = true;\"}}}\n[[/CALL]]\n[[/OPENCODE_TOOL]]",
+    nestedArgsOptions
+  );
+  assert.equal(parsedNestedArgumentsCall.kind, "tool_calls");
+  assert.equal(parsedNestedArgumentsCall.toolCalls[0].function.name, "write");
+  assert.deepEqual(
+    JSON.parse(parsedNestedArgumentsCall.toolCalls[0].function.arguments),
+    { filePath: "src/csv.js", content: "export const ok = true;" }
+  );
   assert.equal(
     parsedLegacyWriteWithToolInput.toolCalls[0].function.arguments,
     JSON.stringify({ filePath: "boss.js", content: "export const boss = true;" })
@@ -422,6 +459,7 @@ function run() {
   assert.equal(parsedMultilineStringTool.kind, "tool_calls");
   assert.equal(parsedMultilineStringTool.toolCalls[0].function.name, "edit");
   assert.match(parsedMultilineStringTool.toolCalls[0].function.arguments, /line1\\nline2\\nline3/);
+
 
   const parsedMalformedTodoWrite = parseBridgeAssistantText(
     "[[OPENCODE_TOOL]]\n{\n  \"tool_calls\": [\n    {\n      \"name\": \"todowrite\",\n      \"arguments\": {\n        \"todos\": [\n          {\n            \"content\": \"First task\",\n            \"status\": \"in_progress\",\n            \"priority\": \"high\"\n          },\n          {\n            \"content\": \"Second task\",\n            \"status\": \"pending\",\n            \"priority\": \"high\"\n          },\n            \"content\": \"Third task\",\n            \"status\": \"pending\",\n            \"priority\": \"medium\"\n        ]\n      }\n    }\n  ]\n}\n[[/OPENCODE_TOOL]]"
@@ -524,9 +562,47 @@ function run() {
   assert.equal(stillUsesContentMarkers.finishReason, "tool_calls");
   assert.equal(stillUsesContentMarkers.message.tool_calls[0].function.name, "write");
 
+  const bashToolSchema = [
+    {
+      type: "function",
+      function: {
+        name: "bash",
+        parameters: {
+          type: "object",
+          properties: {
+            command: { type: "string" },
+            description: { type: "string" }
+          },
+          required: ["command", "description"]
+        }
+      }
+    }
+  ];
+  const bashParseOptions = {
+    toolArgKeyMap: core.buildToolArgumentKeyMap(bashToolSchema),
+    toolRequiredKeyMap: core.buildToolRequiredKeyMap(bashToolSchema)
+  };
+  const bashCallFromB64 = buildBridgeResultFromText(
+    "[OPENCODE_TOOL]\n[CALL]\n{\n  \"name\": \"bash\",\n  \"arguments\": {\n    \"command_b64\": \"bm9kZSB0ZXN0cy90ZXN0Lmpz\"\n  }\n}\n[/CALL]\n[/OPENCODE_TOOL]",
+    "",
+    bashParseOptions
+  );
+  assert.equal(bashCallFromB64.kind, "tool_calls");
+  assert.equal(bashCallFromB64.message.tool_calls[0].function.name, "bash");
+  const bashArgs = JSON.parse(bashCallFromB64.message.tool_calls[0].function.arguments);
+  assert.equal(bashArgs.command, "node tests/test.js");
+  assert.match(bashArgs.description, /Run shell command:/);
+
   const finalResultWithLeadingJunk = buildBridgeResultFromText("]\nHello", "");
   assert.equal(finalResultWithLeadingJunk.kind, "final");
   assert.equal(finalResultWithLeadingJunk.message.content, "Hello");
+
+  const invalidToolBlockResult = buildBridgeResultFromText(
+    "[OPENCODE_TOOL]\n[CALL]\n{\"name\":\"bash\",\"arguments\":{\"command_b64\":\"abc\"\n[/CALL]\n[/OPENCODE_TOOL]",
+    ""
+  );
+  assert.equal(invalidToolBlockResult.kind, "invalid_tool_block");
+  assert.match(invalidToolBlockResult.message.content, /Tool call payload was malformed/);
 
   const sse = buildSSEFromBridge(transcript);
   assert.match(sse, /"finish_reason":"tool_calls"/);
